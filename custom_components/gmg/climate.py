@@ -178,7 +178,7 @@ class GmgGrill(CoordinatorEntity[GmgDataUpdateCoordinator], ClimateEntity):
     @property
     def target_temperature_step(self) -> float:
         """Return the supported step of target temp."""
-        return 1
+        return 5
 
     @property
     def native_target_temperature(self) -> Optional[float]:

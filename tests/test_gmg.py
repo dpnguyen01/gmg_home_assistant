@@ -290,6 +290,8 @@ class TestGmgEntities(unittest.TestCase):
         self.assertEqual(grill_ent.hvac_mode, "heat")
         self.assertEqual(grill_ent.native_current_temperature, 275)
         self.assertEqual(grill_ent.native_target_temperature, 275)
+        self.assertEqual(grill_ent.target_temperature_step, 5)
+        self.assertEqual(probe1_ent.target_temperature_step, 1)
 
         self.assertEqual(probe1_ent.hvac_mode, "heat")
         self.assertEqual(probe1_ent.native_current_temperature, 62)
