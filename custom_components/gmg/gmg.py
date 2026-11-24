@@ -146,7 +146,6 @@ class grill(object):
 
         if target_temp < grill.MIN_TEMP_F_PROBE or target_temp > grill.MAX_TEMP_F_PROBE:
             raise ValueError(f"Target temperature {target_temp} is out of range")
-            return
 
         if probe_number == 1:
             message = b'UF' + str(target_temp).encode() + b'!'
@@ -180,30 +179,30 @@ class grill(object):
         status = None
         count = 0
 
-        # No response from grill so resend status request but no more than 5 times
-        # cannot add delay here because it will delay the whole program (Home assistant)
-        while status is None or count < 5:
+        # No response from grill so resend status request up to 5 times
+        while status is None and count < 5:
             status = self.send(grill.CODE_STATUS)
-
-            # add delay of 2 seconds to allow grill to process status   
             count += 1
 
         if status is None:
-            raise Warning("No response from grill")
-               
-        return self.gmg_status_response(list(status))
+            _LOGGER.debug(f"No response from grill at {self._ip}")
+            self.state = {}
+            return self.state
 
+        return self.gmg_status_response(list(status))
 
     def serial(self):
         """Get serial number of grill"""
-        self._serial_number = self.send(grill.CODE_SERIAL).decode('utf-8')
-
+        raw = self.send(grill.CODE_SERIAL)
+        if raw:
+            self._serial_number = raw.decode('utf-8').strip()
         return self._serial_number
 
-    def send(self, message, timeout = 1):  
+    def send(self, message, timeout = 1):
         """Function to send messages via UDP to grill"""
 
         data = None
+        sock = None
 
         try:
             sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -211,10 +210,25 @@ class grill(object):
 
             sock.sendto(message, (self._ip, grill.UDP_PORT))
             data, _ = sock.recvfrom(1024)
-        
+
         except socket.timeout:
-            print('timeout')
-        except Exception as e: 
-            print(e)
-           
+            _LOGGER.debug(f"Timeout sending to {self._ip}:{grill.UDP_PORT}")
+        except Exception as e:
+            _LOGGER.debug(f"Error sending to {self._ip}:{grill.UDP_PORT}: {e}")
+        finally:
+            if sock is not None:
+                sock.close()
+
         return data
+
+
+def grill_by_host(ip, timeout = 2):
+    """Connect directly to a grill by IP address via unicast UDP."""
+    g = grill(ip)
+    raw = g.send(grill.CODE_SERIAL, timeout=timeout)
+    if raw:
+        serial = raw.decode('utf-8').strip()
+        if serial.startswith('GMG'):
+            g._serial_number = serial
+            return g
+    return None

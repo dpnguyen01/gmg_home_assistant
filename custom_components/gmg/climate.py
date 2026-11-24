@@ -1,25 +1,46 @@
 """Green Mountain Grill"""
 
 
-from .gmg import grills, grill
+from .gmg import grills, grill, grill_by_host
 #from gmg import grills,grill
 import logging
 from typing import List, Optional
-from homeassistant.components.climate import ClimateEntity, ClimateEntityFeature, HVACMode
+import voluptuous as vol
+from homeassistant.components.climate import (
+    PLATFORM_SCHEMA,
+    ClimateEntity,
+    ClimateEntityFeature,
+    HVACMode,
+)
 from homeassistant.const import (
     ATTR_TEMPERATURE,
-    UnitOfTemperature)
+    CONF_HOST,
+    UnitOfTemperature,
+)
+import homeassistant.helpers.config_validation as cv
 
 _LOGGER = logging.getLogger(__name__)
 
+PLATFORM_SCHEMA = PLATFORM_SCHEMA.extend(
+    {
+        vol.Optional(CONF_HOST): cv.string,
+    }
+)
+
+
 async def async_setup_platform(hass, config, async_add_entities, discovery_info=None):
     entities = []
-    _LOGGER.debug("Looking for grills")
+    host = config.get(CONF_HOST)
+    _LOGGER.debug("Looking for grills (host=%s)", host)
 
-    # look for grills.. timeout = 2
-    all_grills = grills(2)
+    if host:
+        found = await hass.async_add_executor_job(grill_by_host, host, 2)
+        all_grills = [found] if found is not None else []
+    else:
+        # look for grills.. timeout = 2
+        all_grills = await hass.async_add_executor_job(grills, 2)
 
-    for my_grill in all_grills: 
+    for my_grill in all_grills:
         _LOGGER.debug(f"Found grill IP: {my_grill._ip} Serial: {my_grill._serial_number}")
 
         entities.append(GmgGrill(my_grill))
@@ -56,17 +77,17 @@ class GmgGrill(ClimateEntity):
 
         if temperature is None:
             return
-        if temperature == self._state['grill_set_temp']:
+        if temperature == self._state.get('grill_set_temp'):
             return
         
         # Add in section if grill is not on to error... 
-        if self._state['on'] == 0:
+        if self._state.get('on', 0) == 0:
             _LOGGER.warning("Grill is not on, cannot set temperature")
             # TODO: Add in section to turn on grill.. May not do this to prevent accidential turning on of grill. 
             return
 
         # Add another section if grill not 150 F to not raise temp.
-        if self._state['temp'] < 145:
+        if self._state.get('temp', 0) < 145:
             # GMG manual says need to wait until 150 F at least before changing temp 
             _LOGGER.warning(f"Grill is not 150 F, cannot set temperature. Temp is {self._state['temp']}")
             return
@@ -113,11 +134,17 @@ class GmgGrill(ClimateEntity):
         return [HVACMode.HEAT, HVACMode.FAN_ONLY, HVACMode.OFF]
 
     @property
+    def available(self) -> bool:
+        """Return True if grill state was retrieved."""
+        return bool(self._state)
+
+    @property
     def hvac_mode(self):
         """Return current HVAC operation."""
-        if self._state['on'] == 1:
+        on_state = self._state.get('on')
+        if on_state == 1:
             return HVACMode.HEAT
-        elif self._state['on'] == 2:
+        elif on_state == 2:
             return HVACMode.FAN_ONLY
 
         return HVACMode.OFF
@@ -192,11 +219,11 @@ class GmgGrillProbe(ClimateEntity):
 
         if temperature is None:
             return
-        if temperature == self._state['probe1_set_temp']:
+        if temperature == self._state.get(f'probe{self._probe_count}_set_temp'):
             return
         
         # Add in section if grill is not on to error... 
-        if self._state['on'] == 0:
+        if self._state.get('on', 0) == 0:
             _LOGGER.error("Grill is not on, cannot set temperature")
             return
 
@@ -213,11 +240,16 @@ class GmgGrillProbe(ClimateEntity):
         return [HVACMode.OFF]
 
     @property
+    def available(self) -> bool:
+        """Return True if grill state was retrieved."""
+        return bool(self._state)
+
+    @property
     def hvac_mode(self):
         """Return current HVAC operation."""
 
         # Probe temp is 89 when it is not plugged in... need to find out if better way to find if connected or not..
-        if self._state['on'] == 1 and self._state[f'probe{self._probe_count}_temp'] != 89:
+        if self._state.get('on') == 1 and self._state.get(f'probe{self._probe_count}_temp') != 89:
             return HVACMode.HEAT
 
         return HVACMode.OFF
