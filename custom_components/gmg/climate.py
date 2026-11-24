@@ -1,11 +1,10 @@
-"""Green Mountain Grill"""
+"""Green Mountain Grill climate platform."""
 
-
-from .gmg import grills, grill, grill_by_host
-#from gmg import grills,grill
 import logging
 from typing import List, Optional
+
 import voluptuous as vol
+
 from homeassistant.components.climate import (
     PLATFORM_SCHEMA,
     ClimateEntity,
@@ -15,9 +14,16 @@ from homeassistant.components.climate import (
 from homeassistant.const import (
     ATTR_TEMPERATURE,
     CONF_HOST,
+    Platform,
     UnitOfTemperature,
 )
 import homeassistant.helpers.config_validation as cv
+from homeassistant.helpers.discovery import async_load_platform
+from homeassistant.helpers.update_coordinator import CoordinatorEntity
+
+from .const import DOMAIN
+from .coordinator import GmgDataUpdateCoordinator
+from .gmg import grill, grill_by_host, grills
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -31,6 +37,7 @@ PLATFORM_SCHEMA = PLATFORM_SCHEMA.extend(
 
 
 async def async_setup_platform(hass, config, async_add_entities, discovery_info=None):
+    """Set up the GMG climate platform."""
     entities = []
     host = config.get(CONF_HOST)
     _LOGGER.debug("Looking for grills (host=%s)", host)
@@ -39,275 +46,289 @@ async def async_setup_platform(hass, config, async_add_entities, discovery_info=
         found = await hass.async_add_executor_job(grill_by_host, host, 2)
         all_grills = [found] if found is not None else []
     else:
-        # look for grills.. timeout = 2
         all_grills = await hass.async_add_executor_job(grills, 2)
 
+    coordinators = hass.data.setdefault(DOMAIN, {})
+
     for my_grill in all_grills:
-        _LOGGER.debug(f"Found grill IP: {my_grill._ip} Serial: {my_grill._serial_number}")
+        _LOGGER.debug(
+            "Found grill IP: %s Serial: %s",
+            my_grill.ip,
+            my_grill.serial_number,
+        )
 
-        entities.append(GmgGrill(my_grill))
+        coordinator = GmgDataUpdateCoordinator(hass, my_grill)
+        await coordinator.async_refresh()
+        coordinators[my_grill.serial_number] = coordinator
 
-        count = 1
-        probe_count = 2
+        entities.append(GmgGrill(coordinator))
+        for count in (1, 2):
+            entities.append(GmgGrillProbe(coordinator, count))
 
-        while count <= probe_count:
-            entities.append(GmgGrillProbe(my_grill, count))
-            count += 1
+        for platform in (Platform.SENSOR, Platform.BINARY_SENSOR):
+            hass.async_create_task(
+                async_load_platform(
+                    hass,
+                    platform,
+                    DOMAIN,
+                    {"serial": my_grill.serial_number},
+                    config,
+                )
+            )
 
     async_add_entities(entities)
 
-    return
 
-class GmgGrill(ClimateEntity):
-    """Representation of a Green Mountain Grill smoker"""
+class GmgGrill(CoordinatorEntity[GmgDataUpdateCoordinator], ClimateEntity):
+    """Representation of a Green Mountain Grill smoker."""
 
     _enable_turn_on_off_backwards_compatibility = False
 
-    def __init__(self, grill) -> None:
+    def __init__(self, coordinator: GmgDataUpdateCoordinator) -> None:
         """Initialize the Grill."""
-        self._grill = grill
-        self._unique_id = "{}".format(self._grill._serial_number)
-        
-        _LOGGER.debug(f"Found grill IP: {self._grill._ip} Serial: {self._grill._serial_number}")
-        
-        self.update()
+        super().__init__(coordinator)
+        self._grill = coordinator.grill
+        self._unique_id = f"{self._grill.serial_number}"
 
+    @property
+    def _state(self) -> dict:
+        return self.coordinator.data or {}
 
-    def set_temperature(self, **kwargs):
+    @property
+    def available(self) -> bool:
+        """Return True if grill state was retrieved."""
+        return super().available and bool(self._state)
+
+    async def async_set_temperature(self, **kwargs) -> None:
         """Set new target temperature."""
         temperature = kwargs.get(ATTR_TEMPERATURE)
-
         if temperature is None:
             return
-        if temperature == self._state.get('grill_set_temp'):
-            return
-        
-        # Add in section if grill is not on to error... 
-        if self._state.get('on', 0) == 0:
-            _LOGGER.warning("Grill is not on, cannot set temperature")
-            # TODO: Add in section to turn on grill.. May not do this to prevent accidential turning on of grill. 
+        if temperature == self._state.get("grill_set_temp"):
             return
 
-        # Add another section if grill not 150 F to not raise temp.
-        if self._state.get('temp', 0) < 145:
-            # GMG manual says need to wait until 150 F at least before changing temp 
-            _LOGGER.warning(f"Grill is not 150 F, cannot set temperature. Temp is {self._state['temp']}")
+        if self._state.get("on", 0) == 0:
+            _LOGGER.warning("Grill is not on, cannot set temperature")
+            return
+
+        if self._state.get("temp", 0) < 145:
+            _LOGGER.warning(
+                "Grill is not 150 F, cannot set temperature. Temp is %s",
+                self._state.get("temp"),
+            )
             return
 
         try:
-            _LOGGER.debug(f"Setting temperature to {temperature}")
-            self._grill.set_temp(int(temperature))
-        except Exception as ex:
-            _LOGGER.error(f"Error setting temperature: {temperature}")
+            _LOGGER.debug("Setting temperature to %s", temperature)
+            await self.hass.async_add_executor_job(
+                self._grill.set_temp, int(temperature)
+            )
+            await self.coordinator.async_request_refresh()
+        except Exception:
+            _LOGGER.exception("Error setting temperature: %s", temperature)
 
-    def set_hvac_mode(self, hvac_mode: str) -> None:
-        """Set the operation mode"""
+    async def async_set_hvac_mode(self, hvac_mode: HVACMode) -> None:
+        """Set the operation mode."""
         if hvac_mode == HVACMode.HEAT:
-            self._grill.power_on()
+            await self.hass.async_add_executor_job(self._grill.power_on)
         elif hvac_mode == HVACMode.OFF:
-            self._grill.power_off()
+            await self.hass.async_add_executor_job(self._grill.power_off)
         elif hvac_mode == HVACMode.FAN_ONLY:
-            self._grill.power_on_cool()
+            await self.hass.async_add_executor_job(self._grill.power_on_cool)
         else:
-            _LOGGER.error(f"Unsupported hvac mode: {hvac_mode}")
+            _LOGGER.error("Unsupported hvac mode: %s", hvac_mode)
+            return
 
-        self.update()
+        await self.coordinator.async_request_refresh()
 
-    def turn_off(self):
+    async def async_turn_off(self) -> None:
         """Turn device off."""
-        return self._grill.power_off()
+        await self.hass.async_add_executor_job(self._grill.power_off)
+        await self.coordinator.async_request_refresh()
 
-    def turn_on(self):
+    async def async_turn_on(self) -> None:
         """Turn device on."""
-        return self._grill.power_on()
-    
+        await self.hass.async_add_executor_job(self._grill.power_on)
+        await self.coordinator.async_request_refresh()
+
     @property
-    def supported_features(self):
+    def supported_features(self) -> ClimateEntityFeature:
         """Return the list of supported features."""
-        return ClimateEntityFeature.TARGET_TEMPERATURE | ClimateEntityFeature.TURN_ON | ClimateEntityFeature.TURN_OFF
-    
+        return (
+            ClimateEntityFeature.TARGET_TEMPERATURE
+            | ClimateEntityFeature.TURN_ON
+            | ClimateEntityFeature.TURN_OFF
+        )
+
     @property
-    def icon(self):
+    def icon(self) -> str:
         return "mdi:grill"
 
     @property
-    def hvac_modes(self) -> List[str]:
+    def hvac_modes(self) -> List[HVACMode]:
         """Return the supported operations."""
         return [HVACMode.HEAT, HVACMode.FAN_ONLY, HVACMode.OFF]
 
     @property
-    def available(self) -> bool:
-        """Return True if grill state was retrieved."""
-        return bool(self._state)
-
-    @property
-    def hvac_mode(self):
+    def hvac_mode(self) -> HVACMode:
         """Return current HVAC operation."""
-        on_state = self._state.get('on')
+        on_state = self._state.get("on")
         if on_state == 1:
             return HVACMode.HEAT
-        elif on_state == 2:
+        if on_state == 2:
             return HVACMode.FAN_ONLY
-
         return HVACMode.OFF
 
     @property
-    def name(self)  -> None:
-        """Return unique ID of grill which is GMGSERIAL_NUMBER"""
+    def name(self) -> str:
+        """Return unique ID of grill which is GMGSERIAL_NUMBER."""
         return self._unique_id
 
-    # Climate Properties
     @property
     def native_temperature_unit(self) -> str:
-        """Return the unit of measurement for the grill"""
-        # intial tests look like raw value always in F not C even when set in the app. 
+        """Return the unit of measurement for the grill."""
         return UnitOfTemperature.FAHRENHEIT
 
     @property
     def native_current_temperature(self) -> Optional[float]:
-        """Return current temp of the grill"""
-        return self._state.get('temp')
+        """Return current temp of the grill."""
+        return self._state.get("temp")
 
     @property
     def target_temperature_step(self) -> float:
-        """Return the supported step of target temp"""
+        """Return the supported step of target temp."""
         return 1
-        
-    @property
-    def native_target_temperature(self) -> Optional[float]:
-        """Return what the temp is set to go to"""
-        return self._state.get('grill_set_temp')
 
     @property
-    def max_temp(self) -> None:
+    def native_target_temperature(self) -> Optional[float]:
+        """Return what the temp is set to go to."""
+        return self._state.get("grill_set_temp")
+
+    @property
+    def max_temp(self) -> float:
         """Return the maximum temperature."""
         return self._grill.MAX_TEMP_F
 
     @property
-    def min_temp(self) -> None:
+    def min_temp(self) -> float:
         """Return the minimum temperature."""
         return self._grill.MIN_TEMP_F
 
     @property
-    def unique_id(self) -> None:
+    def unique_id(self) -> str:
         """Return a unique ID."""
         return self._unique_id
 
-    def update(self) -> None:
-        """Get latest data."""
-        self._state = self._grill.status()
 
-        _LOGGER.debug(f"State: {self._state}")
-
-class GmgGrillProbe(ClimateEntity):
-    """Representation of a Green Mountain Grill smoker food probes"""
+class GmgGrillProbe(CoordinatorEntity[GmgDataUpdateCoordinator], ClimateEntity):
+    """Representation of a Green Mountain Grill smoker food probe."""
 
     _enable_turn_on_off_backwards_compatibility = False
 
-    def __init__(self, grill, probe_count) -> None:
-        """Initialize the Grill."""
-        self._grill = grill
-        self._unique_id = f"{self._grill._serial_number}_probe_{probe_count}"
+    def __init__(
+        self, coordinator: GmgDataUpdateCoordinator, probe_count: int
+    ) -> None:
+        """Initialize the Grill Probe."""
+        super().__init__(coordinator)
+        self._grill = coordinator.grill
         self._probe_count = probe_count
-
-        _LOGGER.debug(f"From grill: {self._grill._serial_number} init probe: {probe_count}")
-
-        self.update()
-
-
-    def set_temperature(self, **kwargs):
-        """Set new target temperature."""
-        temperature = kwargs.get(ATTR_TEMPERATURE)
-
-        if temperature is None:
-            return
-        if temperature == self._state.get(f'probe{self._probe_count}_set_temp'):
-            return
-        
-        # Add in section if grill is not on to error... 
-        if self._state.get('on', 0) == 0:
-            _LOGGER.error("Grill is not on, cannot set temperature")
-            return
-
-        try:
-            _LOGGER.debug(f"Setting probe temperature to {temperature}")
-            self._grill.set_temp_probe(int(temperature), self._probe_count)
-        except Exception as ex:
-            _LOGGER.error(f"Error setting temperature: {temperature}")
-
+        self._unique_id = f"{self._grill.serial_number}_probe_{probe_count}"
 
     @property
-    def hvac_modes(self) -> List[str]:
-        """Return the supported operations."""
-        return [HVACMode.OFF]
+    def _state(self) -> dict:
+        return self.coordinator.data or {}
+
+    @property
+    def _is_connected(self) -> bool:
+        return bool(self._state.get(f"probe{self._probe_count}_connected", False))
 
     @property
     def available(self) -> bool:
         """Return True if grill state was retrieved."""
-        return bool(self._state)
+        return super().available and bool(self._state)
+
+    async def async_set_temperature(self, **kwargs) -> None:
+        """Set new target temperature."""
+        temperature = kwargs.get(ATTR_TEMPERATURE)
+        if temperature is None:
+            return
+        if temperature == self._state.get(f"probe{self._probe_count}_set_temp"):
+            return
+
+        if self._state.get("on", 0) == 0:
+            _LOGGER.error("Grill is not on, cannot set temperature")
+            return
+
+        try:
+            _LOGGER.debug("Setting probe %s temperature to %s", self._probe_count, temperature)
+            await self.hass.async_add_executor_job(
+                self._grill.set_temp_probe, int(temperature), self._probe_count
+            )
+            await self.coordinator.async_request_refresh()
+        except Exception:
+            _LOGGER.exception("Error setting probe temperature: %s", temperature)
 
     @property
-    def hvac_mode(self):
+    def hvac_modes(self) -> List[HVACMode]:
+        """Return the supported operations."""
+        return [HVACMode.OFF]
+
+    @property
+    def hvac_mode(self) -> HVACMode:
         """Return current HVAC operation."""
-
-        # Probe temp is 89 when it is not plugged in... need to find out if better way to find if connected or not..
-        if self._state.get('on') == 1 and self._state.get(f'probe{self._probe_count}_temp') != 89:
+        if self._state.get("on") == 1 and self._is_connected:
             return HVACMode.HEAT
-
         return HVACMode.OFF
 
     @property
-    def supported_features(self):
+    def supported_features(self) -> ClimateEntityFeature:
         """Return the list of supported features."""
         return ClimateEntityFeature.TARGET_TEMPERATURE
-    
+
     @property
-    def icon(self):
+    def icon(self) -> str:
         return "mdi:thermometer-lines"
 
     @property
-    def name(self)  -> None:
-        """Return unique ID of grill which is GMGSERIAL_NUMBER_probe_count"""
+    def name(self) -> str:
+        """Return unique ID of grill probe."""
         return self._unique_id
 
     @property
     def native_temperature_unit(self) -> str:
-        """Return the unit of measurement for the probe"""
-        # intial tests look like raw value always in F not C even when set in the app. 
+        """Return the unit of measurement for the probe."""
         return UnitOfTemperature.FAHRENHEIT
 
     @property
     def native_current_temperature(self) -> Optional[float]:
-        """Return current temp of the grill"""
-        return self._state.get(f'probe{self._probe_count}_temp')
+        """Return current temp of the probe, or None when unplugged."""
+        if not self._is_connected:
+            return None
+        return self._state.get(f"probe{self._probe_count}_temp")
 
     @property
     def target_temperature_step(self) -> float:
-        """Return the supported step of target temp"""        
+        """Return the supported step of target temp."""
         return 1
-        
-    @property
-    def native_target_temperature(self) -> Optional[float]:
-        """Return what the temp is set to go to"""
-        return self._state.get(f'probe{self._probe_count}_set_temp')
 
     @property
-    def max_temp(self) -> None:
+    def native_target_temperature(self) -> Optional[float]:
+        """Return what the temp is set to go to."""
+        if not self._is_connected:
+            return None
+        return self._state.get(f"probe{self._probe_count}_set_temp")
+
+    @property
+    def max_temp(self) -> float:
         """Return the maximum temperature."""
         return self._grill.MAX_TEMP_F_PROBE
 
     @property
-    def min_temp(self) -> None:
+    def min_temp(self) -> float:
         """Return the minimum temperature."""
         return self._grill.MIN_TEMP_F_PROBE
 
     @property
-    def unique_id(self) -> None:
+    def unique_id(self) -> str:
         """Return a unique ID."""
         return self._unique_id
-
-    def update(self) -> None:
-        """Get latest data."""
-        self._state = self._grill.status()
-
-        #_LOGGER.debug(f"State: {self._state}")

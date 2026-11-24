@@ -52,9 +52,9 @@ def grills(timeout = 1, ip_bind_address = '0.0.0.0'):
                     if response.startswith('GMG'):
                         _LOGGER.debug(f"Found grill {address}:{retSocket}, {response}")
                         for grillTest in grills:
-                            if grillTest._serial_number == response:  # TODO: Define a property for serial number
-                                _LOGGER.debug(f"Grill {response} is a duplicate.  Not adding to collection.")
-                                addGrill = False
+                        if grillTest.serial_number == response:
+                            _LOGGER.debug(f"Grill {response} is a duplicate.  Not adding to collection.")
+                            addGrill = False
 
                         if addGrill:
                             grills.append(grill(address, response))
@@ -93,6 +93,21 @@ class grill(object):
         self._ip = ip 
         self._serial_number = serial_number
 
+    @property
+    def ip(self) -> str:
+        """Return grill IP address."""
+        return self._ip
+
+    @property
+    def serial_number(self) -> str:
+        """Return grill serial number."""
+        return self._serial_number
+
+    @staticmethod
+    def _decode_temp(value_list, low_idx, high_idx) -> int:
+        """Decode little-endian 16-bit temperature from two status bytes."""
+        return value_list[low_idx] + (value_list[high_idx] << 8)
+
     def gmg_status_response (self, value_list):
         # accept list of values from status 
         self.state = {}
@@ -102,22 +117,24 @@ class grill(object):
         # grill general status
         try:
             self.state['on'] = value_list[30]
-            self.state['temp'] = value_list[2]
+            self.state['temp'] = self._decode_temp(value_list, 2, 3)
             self.state['temp_high'] = value_list[3]
-            self.state['grill_set_temp'] = value_list[6]
+            self.state['grill_set_temp'] = self._decode_temp(value_list, 6, 7)
             self.state['grill_set_temp_high'] = value_list[7]
 
             # probe 1 stats
-            self.state['probe1_temp'] = value_list[4]
+            self.state['probe1_temp'] = self._decode_temp(value_list, 4, 5)
             self.state['probe1_temp_high'] = value_list[5]
-            self.state['probe1_set_temp'] = value_list[28]
+            self.state['probe1_set_temp'] = self._decode_temp(value_list, 28, 29)
             self.state['probe1_set_temp_high'] = value_list[29]
-            
+            self.state['probe1_connected'] = self.state['probe1_temp'] <= grill.MAX_TEMP_F_PROBE
+
             # probe 2 stats
-            self.state['probe2_temp'] = value_list[16]
+            self.state['probe2_temp'] = self._decode_temp(value_list, 16, 17)
             self.state['probe2_temp_high'] = value_list[17]
-            self.state['probe2_set_temp'] = value_list[18]
+            self.state['probe2_set_temp'] = self._decode_temp(value_list, 18, 19)
             self.state['probe2_set_temp_high'] = value_list[19]
+            self.state['probe2_connected'] = self.state['probe2_temp'] <= grill.MAX_TEMP_F_PROBE
 
             # Grill health stats
             self.state['fireState'] = value_list[32]
@@ -125,7 +142,7 @@ class grill(object):
             self.state['warnState'] = value_list[24]
 
         except Exception as e:
-            print(e)
+            _LOGGER.debug(f"Error parsing status response: {e}")
             
         _LOGGER.debug(f"Status response: {self.state}") 
 
