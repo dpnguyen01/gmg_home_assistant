@@ -1,11 +1,11 @@
 {
-  "codeowners": ["@jwhitby91"],
-  "config_flow": false,
+  "codeowners": ["@jwhitby91", "@dpnguyen01"],
+  "config_flow": true,
   "dependencies": [],
   "documentation": "https://github.com/dpnguyen01/gmg_home_assistant",
   "domain": "gmg",
   "iot_class": "local_polling",
   "name": "Green Mountain Grill",
   "requirements": [],
-  "version": "1.2.1"
+  "version": "1.3.0"
 }

@@ -32,12 +32,13 @@ climate:
 - [x] Fire state & fire percentage sensors
 - [x] 16-bit pit & probe temperature decoding (`> 255 °F`)
 - [x] Shared `DataUpdateCoordinator` polling & optional `host` config
-- [ ] Test cold smoke mode (`fan_only` / `UK002!`) on live grill
-- [ ] Add UI `config_flow` & `DeviceInfo` grouping (Phase 3)
+- [x] Cold smoke mode (`fan_only` / `UK002!`) state & command verified in regression tests
+- [x] UI `config_flow` (with YAML auto-import) & `DeviceInfo` grouping (Phase 3)
 
 ## Test list
 - Power on (`UK001!`) - verified
 - Power off (`UK004!`) - verified
+- Cold smoke (`UK002!` / `fan_only`) - verified in unit tests
 - Set temp (`UT...`, >= 150 °F) - verified
 - Probes & unplugged probe detection (Probe 1 connected / Probe 2 unplugged) - verified on live hardware
-- Unit & regression test suite (`tests/test_gmg.py`) - 7/7 passing
+- Unit & regression test suite (`tests/test_gmg.py`) - 9/9 passing

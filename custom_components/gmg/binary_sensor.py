@@ -1,27 +1,22 @@
 """Green Mountain Grill binary_sensor platform."""
 
-from typing import Optional
-
 from homeassistant.components.binary_sensor import (
     BinarySensorDeviceClass,
     BinarySensorEntity,
 )
+from homeassistant.config_entries import ConfigEntry
+from homeassistant.core import HomeAssistant
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .const import DOMAIN
 from .coordinator import GmgDataUpdateCoordinator
 
 
-async def async_setup_platform(hass, config, async_add_entities, discovery_info=None):
-    """Set up GMG binary sensors from discovery_info."""
-    if not discovery_info:
-        return
-
-    serial = discovery_info.get("serial")
-    coordinator: Optional[GmgDataUpdateCoordinator] = hass.data.get(DOMAIN, {}).get(serial)
-    if coordinator is None:
-        return
-
+async def async_setup_entry(
+    hass: HomeAssistant, entry: ConfigEntry, async_add_entities
+) -> None:
+    """Set up GMG binary sensors from a config entry."""
+    coordinator: GmgDataUpdateCoordinator = hass.data[DOMAIN][entry.entry_id]
     entities: list[BinarySensorEntity] = [
         GmgProbeConnectedBinarySensor(coordinator, 1),
         GmgProbeConnectedBinarySensor(coordinator, 2),
@@ -38,6 +33,7 @@ class GmgBaseBinarySensor(
     def __init__(self, coordinator: GmgDataUpdateCoordinator) -> None:
         super().__init__(coordinator)
         self._serial = coordinator.grill.serial_number
+        self._attr_device_info = coordinator.device_info
 
     @property
     def _state(self) -> dict:

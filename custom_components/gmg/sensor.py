@@ -7,23 +7,20 @@ from homeassistant.components.sensor import (
     SensorEntity,
     SensorStateClass,
 )
+from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import PERCENTAGE, UnitOfTemperature
+from homeassistant.core import HomeAssistant
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .const import DOMAIN, FIRE_STATES, WARN_STATES
 from .coordinator import GmgDataUpdateCoordinator
 
 
-async def async_setup_platform(hass, config, async_add_entities, discovery_info=None):
-    """Set up GMG sensors from discovery_info."""
-    if not discovery_info:
-        return
-
-    serial = discovery_info.get("serial")
-    coordinator: Optional[GmgDataUpdateCoordinator] = hass.data.get(DOMAIN, {}).get(serial)
-    if coordinator is None:
-        return
-
+async def async_setup_entry(
+    hass: HomeAssistant, entry: ConfigEntry, async_add_entities
+) -> None:
+    """Set up GMG sensors from a config entry."""
+    coordinator: GmgDataUpdateCoordinator = hass.data[DOMAIN][entry.entry_id]
     entities: list[SensorEntity] = [
         GmgFireStateSensor(coordinator),
         GmgFirePercentageSensor(coordinator),
@@ -40,6 +37,7 @@ class GmgBaseSensor(CoordinatorEntity[GmgDataUpdateCoordinator], SensorEntity):
     def __init__(self, coordinator: GmgDataUpdateCoordinator) -> None:
         super().__init__(coordinator)
         self._serial = coordinator.grill.serial_number
+        self._attr_device_info = coordinator.device_info
 
     @property
     def _state(self) -> dict:

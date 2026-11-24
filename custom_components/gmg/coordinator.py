@@ -4,6 +4,7 @@ from datetime import timedelta
 import logging
 
 from homeassistant.core import HomeAssistant
+from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 
 from .const import DOMAIN
@@ -26,6 +27,12 @@ class GmgDataUpdateCoordinator(DataUpdateCoordinator[dict]):
             update_interval=DEFAULT_SCAN_INTERVAL,
         )
         self.grill = gmg_grill
+        self.device_info = DeviceInfo(
+            identifiers={(DOMAIN, gmg_grill.serial_number)},
+            name=gmg_grill.serial_number,
+            manufacturer="Green Mountain Grills",
+            model="GMG Pellet Grill",
+        )
 
     async def _async_update_data(self) -> dict:
         """Fetch latest status from the grill."""

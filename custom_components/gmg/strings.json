@@ -1,0 +1,20 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Connect Green Mountain Grill",
+        "description": "Enter your grill's IP address, or leave blank to auto-discover on your local network via UDP port 8080.",
+        "data": {
+          "host": "IP Address (optional)"
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "Could not connect to a Green Mountain Grill. Ensure it is powered on and reachable on UDP port 8080."
+    },
+    "abort": {
+      "already_configured": "This grill is already configured.",
+      "cannot_connect": "Could not discover or connect to a Green Mountain Grill during import."
+    }
+  }
+}

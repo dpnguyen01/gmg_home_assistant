@@ -11,19 +11,18 @@ from homeassistant.components.climate import (
     ClimateEntityFeature,
     HVACMode,
 )
+from homeassistant.config_entries import SOURCE_IMPORT, ConfigEntry
 from homeassistant.const import (
     ATTR_TEMPERATURE,
     CONF_HOST,
-    Platform,
     UnitOfTemperature,
 )
+from homeassistant.core import HomeAssistant
 import homeassistant.helpers.config_validation as cv
-from homeassistant.helpers.discovery import async_load_platform
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .const import DOMAIN
 from .coordinator import GmgDataUpdateCoordinator
-from .gmg import grill, grill_by_host, grills
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -37,45 +36,26 @@ PLATFORM_SCHEMA = PLATFORM_SCHEMA.extend(
 
 
 async def async_setup_platform(hass, config, async_add_entities, discovery_info=None):
-    """Set up the GMG climate platform."""
-    entities = []
-    host = config.get(CONF_HOST)
-    _LOGGER.debug("Looking for grills (host=%s)", host)
-
-    if host:
-        found = await hass.async_add_executor_job(grill_by_host, host, 2)
-        all_grills = [found] if found is not None else []
-    else:
-        all_grills = await hass.async_add_executor_job(grills, 2)
-
-    coordinators = hass.data.setdefault(DOMAIN, {})
-
-    for my_grill in all_grills:
-        _LOGGER.debug(
-            "Found grill IP: %s Serial: %s",
-            my_grill.ip,
-            my_grill.serial_number,
+    """Import legacy YAML platform config into a config entry."""
+    hass.async_create_task(
+        hass.config_entries.flow.async_init(
+            DOMAIN,
+            context={"source": SOURCE_IMPORT},
+            data=dict(config),
         )
+    )
 
-        coordinator = GmgDataUpdateCoordinator(hass, my_grill)
-        await coordinator.async_refresh()
-        coordinators[my_grill.serial_number] = coordinator
 
-        entities.append(GmgGrill(coordinator))
-        for count in (1, 2):
-            entities.append(GmgGrillProbe(coordinator, count))
-
-        for platform in (Platform.SENSOR, Platform.BINARY_SENSOR):
-            hass.async_create_task(
-                async_load_platform(
-                    hass,
-                    platform,
-                    DOMAIN,
-                    {"serial": my_grill.serial_number},
-                    config,
-                )
-            )
-
+async def async_setup_entry(
+    hass: HomeAssistant, entry: ConfigEntry, async_add_entities
+) -> None:
+    """Set up GMG climate entities from a config entry."""
+    coordinator: GmgDataUpdateCoordinator = hass.data[DOMAIN][entry.entry_id]
+    entities = [
+        GmgGrill(coordinator),
+        GmgGrillProbe(coordinator, 1),
+        GmgGrillProbe(coordinator, 2),
+    ]
     async_add_entities(entities)
 
 
@@ -89,6 +69,7 @@ class GmgGrill(CoordinatorEntity[GmgDataUpdateCoordinator], ClimateEntity):
         super().__init__(coordinator)
         self._grill = coordinator.grill
         self._unique_id = f"{self._grill.serial_number}"
+        self._attr_device_info = coordinator.device_info
 
     @property
     def _state(self) -> dict:
@@ -233,6 +214,7 @@ class GmgGrillProbe(CoordinatorEntity[GmgDataUpdateCoordinator], ClimateEntity):
         self._grill = coordinator.grill
         self._probe_count = probe_count
         self._unique_id = f"{self._grill.serial_number}_probe_{probe_count}"
+        self._attr_device_info = coordinator.device_info
 
     @property
     def _state(self) -> dict:

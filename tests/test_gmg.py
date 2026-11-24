@@ -55,8 +55,34 @@ def _install_ha_stubs(gmg_mod):
     ha_helpers = types.ModuleType("homeassistant.helpers")
     ha_cv = types.ModuleType("homeassistant.helpers.config_validation")
     ha_cv.string = str
-    ha_disc = types.ModuleType("homeassistant.helpers.discovery")
-    ha_disc.async_load_platform = MagicMock()
+    ha_dr = types.ModuleType("homeassistant.helpers.device_registry")
+    ha_dr.DeviceInfo = lambda **kwargs: kwargs
+
+    ha_ce = types.ModuleType("homeassistant.config_entries")
+    ha_ce.SOURCE_IMPORT = "import"
+    ha_ce.ConfigEntry = object
+    ha_ce.ConfigFlowResult = dict
+
+    class _BaseConfigFlow:
+        def __init_subclass__(cls, domain=None, **kwargs):
+            cls.domain = domain
+
+        async def async_set_unique_id(self, uid):
+            self._uid = uid
+
+        def _abort_if_unique_id_configured(self):
+            pass
+
+        def async_create_entry(self, title="", data=None):
+            return {"type": "create_entry", "title": title, "data": data}
+
+        def async_show_form(self, step_id="", data_schema=None, errors=None):
+            return {"type": "form", "step_id": step_id, "errors": errors or {}}
+
+        def async_abort(self, reason=""):
+            return {"type": "abort", "reason": reason}
+
+    ha_ce.ConfigFlow = _BaseConfigFlow
 
     class _BaseCoordinator:
         def __class_getitem__(cls, item):
@@ -82,7 +108,8 @@ def _install_ha_stubs(gmg_mod):
     ha_uc.CoordinatorEntity = _BaseCoordinatorEntity
 
     vol = types.ModuleType("voluptuous")
-    vol.Optional = lambda k: k
+    vol.Optional = lambda k, default=None: k
+    vol.Schema = lambda d: d
     vol.ALLOW_EXTRA = "ALLOW_EXTRA"
 
     modules = {
@@ -90,13 +117,14 @@ def _install_ha_stubs(gmg_mod):
         "homeassistant": ha,
         "homeassistant.core": ha_core,
         "homeassistant.const": ha_const,
+        "homeassistant.config_entries": ha_ce,
         "homeassistant.components": ha_comp,
         "homeassistant.components.climate": ha_climate,
         "homeassistant.components.sensor": ha_sensor,
         "homeassistant.components.binary_sensor": ha_bs,
         "homeassistant.helpers": ha_helpers,
         "homeassistant.helpers.config_validation": ha_cv,
-        "homeassistant.helpers.discovery": ha_disc,
+        "homeassistant.helpers.device_registry": ha_dr,
         "homeassistant.helpers.update_coordinator": ha_uc,
     }
     sys.modules.update(modules)
@@ -300,6 +328,51 @@ class TestGmgEntities(unittest.TestCase):
         self.assertFalse(grill_ent.available)
         self.assertFalse(fire_state.available)
         self.assertFalse(p1_conn.available)
+
+    def test_cold_smoke_mode_and_device_info(self):
+        pkt = _make_status_packet(pit=75, on=2, fire_state=0)
+        coord = self._make_coordinator(pkt)
+
+        grill_ent = self.climate.GmgGrill(coord)
+        fire_state = self.sensor.GmgFireStateSensor(coord)
+        p1_conn = self.binary_sensor.GmgProbeConnectedBinarySensor(coord, 1)
+
+        self.assertEqual(grill_ent.hvac_mode, "fan_only")
+        expected_ids = {("gmg", "GMG12148258")}
+        self.assertEqual(grill_ent._attr_device_info["identifiers"], expected_ids)
+        self.assertEqual(fire_state._attr_device_info["identifiers"], expected_ids)
+        self.assertEqual(p1_conn._attr_device_info["identifiers"], expected_ids)
+
+    def test_config_flow_user_and_import(self):
+        import asyncio
+        cf_mod = importlib.import_module("custom_components.gmg.config_flow")
+        flow = cf_mod.GmgConfigFlow()
+        fake_hass = MagicMock()
+
+        async def _run_exec(fn, *args):
+            return fn(*args)
+
+        fake_hass.async_add_executor_job = _run_exec
+        flow.hass = fake_hass
+
+        with patch.object(
+            cf_mod,
+            "grill_by_host",
+            return_value=self.gmg.grill("192.168.68.80", "GMG12148258"),
+        ):
+            res = asyncio.run(flow.async_step_user({"host": "192.168.68.80"}))
+            self.assertEqual(res["type"], "create_entry")
+            self.assertEqual(res["title"], "GMG12148258")
+            self.assertEqual(res["data"]["host"], "192.168.68.80")
+
+            imp = asyncio.run(flow.async_step_import({"host": "192.168.68.80"}))
+            self.assertEqual(imp["type"], "create_entry")
+            self.assertEqual(imp["data"]["serial_number"], "GMG12148258")
+
+        with patch.object(cf_mod, "grill_by_host", return_value=None):
+            err = asyncio.run(flow.async_step_user({"host": "192.168.68.80"}))
+            self.assertEqual(err["type"], "form")
+            self.assertEqual(err["errors"]["base"], "cannot_connect")
 
 
 if __name__ == "__main__":
