@@ -24,7 +24,9 @@ _LOGGER = logging.getLogger(__name__)
 PLATFORM_SCHEMA = PLATFORM_SCHEMA.extend(
     {
         vol.Optional(CONF_HOST): cv.string,
-    }
+        vol.Optional("grill_name"): cv.string,
+    },
+    extra=vol.ALLOW_EXTRA,
 )
 
 
@@ -156,23 +158,23 @@ class GmgGrill(ClimateEntity):
 
     # Climate Properties
     @property
-    def temperature_unit(self) -> None:
+    def native_temperature_unit(self) -> str:
         """Return the unit of measurement for the grill"""
         # intial tests look like raw value always in F not C even when set in the app. 
         return UnitOfTemperature.FAHRENHEIT
 
     @property
-    def current_temperature(self) -> None:
+    def native_current_temperature(self) -> Optional[float]:
         """Return current temp of the grill"""
         return self._state.get('temp')
 
     @property
-    def target_temperature_step(self) -> None:
+    def target_temperature_step(self) -> float:
         """Return the supported step of target temp"""
         return 1
         
     @property
-    def target_temperature(self) -> None:
+    def native_target_temperature(self) -> Optional[float]:
         """Return what the temp is set to go to"""
         return self._state.get('grill_set_temp')
 
@@ -269,23 +271,23 @@ class GmgGrillProbe(ClimateEntity):
         return self._unique_id
 
     @property
-    def temperature_unit(self) -> None:
+    def native_temperature_unit(self) -> str:
         """Return the unit of measurement for the probe"""
         # intial tests look like raw value always in F not C even when set in the app. 
         return UnitOfTemperature.FAHRENHEIT
 
     @property
-    def current_temperature(self) -> None:
+    def native_current_temperature(self) -> Optional[float]:
         """Return current temp of the grill"""
         return self._state.get(f'probe{self._probe_count}_temp')
 
     @property
-    def target_temperature_step(self) -> None:
+    def target_temperature_step(self) -> float:
         """Return the supported step of target temp"""        
         return 1
         
     @property
-    def target_temperature(self) -> None:
+    def native_target_temperature(self) -> Optional[float]:
         """Return what the temp is set to go to"""
         return self._state.get(f'probe{self._probe_count}_set_temp')
 
