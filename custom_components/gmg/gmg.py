@@ -52,9 +52,9 @@ def grills(timeout = 1, ip_bind_address = '0.0.0.0'):
                     if response.startswith('GMG'):
                         _LOGGER.debug(f"Found grill {address}:{retSocket}, {response}")
                         for grillTest in grills:
-                        if grillTest.serial_number == response:
-                            _LOGGER.debug(f"Grill {response} is a duplicate.  Not adding to collection.")
-                            addGrill = False
+                            if grillTest.serial_number == response:
+                                _LOGGER.debug(f"Grill {response} is a duplicate.  Not adding to collection.")
+                                addGrill = False
 
                         if addGrill:
                             grills.append(grill(address, response))
