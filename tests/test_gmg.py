@@ -224,6 +224,9 @@ class TestGmgProtocol(unittest.TestCase):
         with patch.object(self.gmg.grill, "send", return_value=None):
             self.assertIsNone(self.gmg.grill_by_host("192.168.68.80"))
 
+        with patch.object(self.gmg.grill, "send", return_value=b"\x00\x00\xf5\x00"):
+            self.assertIsNone(self.gmg.grill_by_host("192.168.68.80"))
+
     def test_command_encoding_and_bounds(self):
         g = self.gmg.grill("192.168.68.80", "GMG12148258")
         with patch.object(g, "send", return_value=b"OK") as mock_send:
@@ -436,6 +439,46 @@ class TestGmgEntities(unittest.TestCase):
             g.gmg_status_response(list(_make_status_packet(pit=246, probe1=75, on=1)))
         )
         self.assertEqual(s6["probe1_temp"], 75)
+
+    def test_coordinator_holds_state_across_transient_missed_polls(self):
+        import asyncio
+
+        g = self.gmg.grill("192.168.68.80", "GMG12148258")
+        fake_hass = MagicMock()
+
+        async def _run_exec(fn, *args):
+            return fn(*args)
+
+        fake_hass.async_add_executor_job = _run_exec
+        coord = self.coordinator_mod.GmgDataUpdateCoordinator(fake_hass, g)
+
+        valid_state = g.gmg_status_response(list(_make_status_packet(pit=275, on=1)))
+
+        # Initial valid poll
+        with patch.object(g, "status", return_value=valid_state):
+            coord.data = asyncio.run(coord._async_update_data())
+        self.assertEqual(coord.data["temp"], 275)
+
+        # 1st and 2nd missed/empty polls hold last known state
+        with patch.object(g, "status", return_value={}):
+            coord.data = asyncio.run(coord._async_update_data())
+            self.assertEqual(coord.data["temp"], 275)
+            coord.data = asyncio.run(coord._async_update_data())
+            self.assertEqual(coord.data["temp"], 275)
+
+        # Recovery resets missed poll counter
+        with patch.object(g, "status", return_value=valid_state):
+            coord.data = asyncio.run(coord._async_update_data())
+        self.assertEqual(coord._missed_polls, 0)
+
+        # MAX_MISSED_POLLS consecutive empty polls mark grill offline
+        with patch.object(g, "status", return_value={}):
+            for _ in range(self.coordinator_mod.MAX_MISSED_POLLS - 1):
+                coord.data = asyncio.run(coord._async_update_data())
+                self.assertEqual(coord.data["temp"], 275)
+            coord.data = asyncio.run(coord._async_update_data())
+            self.assertEqual(coord.data, {})
+            self.assertEqual(coord._last_valid_temps, {})
 
 
 if __name__ == "__main__":

@@ -240,7 +240,10 @@ class grill(object):
         """Get serial number of grill"""
         raw = self.send(grill.CODE_SERIAL)
         if raw:
-            self._serial_number = raw.decode('utf-8').strip()
+            try:
+                self._serial_number = raw.decode('utf-8').strip()
+            except UnicodeDecodeError:
+                _LOGGER.debug("Ignoring non-UTF-8 serial response from %s", self._ip)
         return self._serial_number
 
     def send(self, message, timeout = 1):
@@ -272,7 +275,11 @@ def grill_by_host(ip, timeout = 2):
     g = grill(ip)
     raw = g.send(grill.CODE_SERIAL, timeout=timeout)
     if raw:
-        serial = raw.decode('utf-8').strip()
+        try:
+            serial = raw.decode('utf-8').strip()
+        except UnicodeDecodeError:
+            _LOGGER.debug("Ignoring non-UTF-8 serial response from %s", ip)
+            return None
         if serial.startswith('GMG'):
             g._serial_number = serial
             return g

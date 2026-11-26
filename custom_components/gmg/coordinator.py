@@ -13,6 +13,7 @@ from .gmg import grill
 _LOGGER = logging.getLogger(__name__)
 
 DEFAULT_SCAN_INTERVAL = timedelta(seconds=15)
+MAX_MISSED_POLLS = 3
 
 
 class GmgDataUpdateCoordinator(DataUpdateCoordinator[dict]):
@@ -35,6 +36,7 @@ class GmgDataUpdateCoordinator(DataUpdateCoordinator[dict]):
         )
         self._last_valid_temps: dict[str, int] = {}
         self._pending_spikes: dict[str, int] = {}
+        self._missed_polls = 0
 
     def _filter_temp_key(self, state: dict, key: str, max_delta: int) -> None:
         """Suppress single-poll temperature spikes by requiring 2 consecutive polls for large jumps."""
@@ -89,4 +91,20 @@ class GmgDataUpdateCoordinator(DataUpdateCoordinator[dict]):
     async def _async_update_data(self) -> dict:
         """Fetch latest status from the grill."""
         state = await self.hass.async_add_executor_job(self.grill.status)
+        if not state:
+            self._missed_polls += 1
+            if self.data and self._missed_polls < MAX_MISSED_POLLS:
+                _LOGGER.debug(
+                    "Empty status from grill %s (%s/%s missed polls); holding last known state",
+                    self.grill.serial_number,
+                    self._missed_polls,
+                    MAX_MISSED_POLLS,
+                )
+                return self.data
+
+            self._last_valid_temps.clear()
+            self._pending_spikes.clear()
+            return {}
+
+        self._missed_polls = 0
         return self._filter_spikes(state)
