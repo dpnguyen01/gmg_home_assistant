@@ -35,11 +35,10 @@ Forked from [`jwhitby91/gmg_home_assistant`](https://github.com/jwhitby91/gmg_ho
 
 ## Installation
 
-### Option 1: HACS (Recommended)
-1. Open **HACS** in Home Assistant.
-2. Click the three-dot menu (top right) → **Custom repositories**.
-3. Add `https://github.com/dpnguyen01/gmg_home_assistant` with category **Integration**.
-4. Search for **Green Mountain Grill**, download it, and **restart Home Assistant**.
+### Option 1: Home Assistant Marketplace (Recommended)
+1. Open **Settings → Marketplace** (or **Marketplace** in the Home Assistant sidebar).
+2. Open the menu (top right) → **Custom repositories** and add `https://github.com/dpnguyen01/gmg_home_assistant` as **Integration**.
+3. Search for **Green Mountain Grill**, install/download it, and **restart Home Assistant**.
 
 ### Option 2: Manual Installation
 1. Copy `custom_components/gmg` into your Home Assistant `config/custom_components/gmg` directory.
