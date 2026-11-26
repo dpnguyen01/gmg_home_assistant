@@ -249,6 +249,19 @@ class TestGmgProtocol(unittest.TestCase):
         with self.assertRaises(ValueError):
             g.set_temp_probe(258, 2)
 
+    def test_corrupted_out_of_range_status_packets_are_rejected(self):
+        g = self.gmg.grill("192.168.68.80", "GMG12148258")
+        bad_packets = [
+            _make_status_packet(pit=601, grill_set=65535),
+            _make_status_packet(pit=1536, grill_set=6450),
+            _make_status_packet(probe1_set=12354),
+            _make_status_packet(probe2_set=65280),
+            _make_status_packet(on=9),
+            b"\x00" * 10,
+        ]
+        for pkt in bad_packets:
+            self.assertEqual(g.gmg_status_response(list(pkt)), {})
+
 
 class TestGmgEntities(unittest.TestCase):
     """Test climate, sensor, and binary_sensor entity behavior."""
@@ -296,10 +309,12 @@ class TestGmgEntities(unittest.TestCase):
         self.assertEqual(probe1_ent.hvac_mode, "heat")
         self.assertEqual(probe1_ent.native_current_temperature, 62)
         self.assertEqual(probe1_ent.native_target_temperature, 165)
+        self.assertEqual(probe1_ent.min_temp, 100)
 
         self.assertEqual(probe2_ent.hvac_mode, "off")
         self.assertIsNone(probe2_ent.native_current_temperature)
         self.assertIsNone(probe2_ent.native_target_temperature)
+        self.assertEqual(probe2_ent.min_temp, 100)
 
         fire_state = self.sensor.GmgFireStateSensor(coord)
         fire_pct = self.sensor.GmgFirePercentageSensor(coord)
@@ -336,10 +351,12 @@ class TestGmgEntities(unittest.TestCase):
         coord = self._make_coordinator(pkt)
 
         grill_ent = self.climate.GmgGrill(coord)
+        probe1_ent = self.climate.GmgGrillProbe(coord, 1)
         fire_state = self.sensor.GmgFireStateSensor(coord)
         p1_conn = self.binary_sensor.GmgProbeConnectedBinarySensor(coord, 1)
 
         self.assertEqual(grill_ent.hvac_mode, "fan_only")
+        self.assertEqual(probe1_ent.min_temp, 32)
         expected_ids = {("gmg", "GMG12148258")}
         self.assertEqual(grill_ent._attr_device_info["identifiers"], expected_ids)
         self.assertEqual(fire_state._attr_device_info["identifiers"], expected_ids)
@@ -375,6 +392,50 @@ class TestGmgEntities(unittest.TestCase):
             err = asyncio.run(flow.async_step_user({"host": "192.168.68.80"}))
             self.assertEqual(err["type"], "form")
             self.assertEqual(err["errors"]["base"], "cannot_connect")
+
+    def test_coordinator_filters_single_poll_pit_and_probe_spikes(self):
+        g = self.gmg.grill("192.168.68.80", "GMG12148258")
+        coord = self.coordinator_mod.GmgDataUpdateCoordinator(MagicMock(), g)
+
+        # Baseline reading
+        s1 = coord._filter_spikes(
+            g.gmg_status_response(list(_make_status_packet(pit=245, probe1=102, on=1)))
+        )
+        self.assertEqual(s1["temp"], 245)
+        self.assertEqual(s1["probe1_temp"], 102)
+
+        # Single-poll spikes on both pit (245 -> 380) and probe 1 (102 -> 180)
+        s2 = coord._filter_spikes(
+            g.gmg_status_response(list(_make_status_packet(pit=380, probe1=180, on=1)))
+        )
+        self.assertEqual(s2["temp"], 245)
+        self.assertEqual(s2["probe1_temp"], 102)
+
+        # Next poll returns to normal -> spikes were never exposed
+        s3 = coord._filter_spikes(
+            g.gmg_status_response(list(_make_status_packet(pit=246, probe1=106, on=1)))
+        )
+        self.assertEqual(s3["temp"], 246)
+        self.assertEqual(s3["probe1_temp"], 106)
+
+        # Two consecutive polls at a genuinely new level are accepted
+        s4 = coord._filter_spikes(
+            g.gmg_status_response(list(_make_status_packet(pit=246, probe1=130, on=1)))
+        )
+        self.assertEqual(s4["probe1_temp"], 106)
+        s5 = coord._filter_spikes(
+            g.gmg_status_response(list(_make_status_packet(pit=246, probe1=131, on=1)))
+        )
+        self.assertEqual(s5["probe1_temp"], 131)
+
+        # Unplugging and re-plugging resets baseline
+        coord._filter_spikes(
+            g.gmg_status_response(list(_make_status_packet(pit=246, probe1=601, on=1)))
+        )
+        s6 = coord._filter_spikes(
+            g.gmg_status_response(list(_make_status_packet(pit=246, probe1=75, on=1)))
+        )
+        self.assertEqual(s6["probe1_temp"], 75)
 
 
 if __name__ == "__main__":

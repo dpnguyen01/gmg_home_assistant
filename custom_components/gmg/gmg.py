@@ -77,7 +77,8 @@ class grill(object):
     UDP_PORT = 8080
     MIN_TEMP_F = 150 # Minimum temperature in degrees Fahrenheit
     MAX_TEMP_F = 500 # Maximum Temperature in degrees Fahrenheit
-    MIN_TEMP_F_PROBE = 32 # Mimimum temperature in degrees Fahrenheit
+    MIN_TEMP_F_PROBE = 32 # Minimum temperature in degrees Fahrenheit
+    MIN_TEMP_F_PROBE_HEAT = 100 # Minimum probe target temp in heat mode
     MAX_TEMP_F_PROBE = 257 # Maximum temperature in degrees Fahrenheit 
     
     CODE_SERIAL = b'UL!'
@@ -116,23 +117,50 @@ class grill(object):
 
         # grill general status
         try:
-            self.state['on'] = value_list[30]
-            self.state['temp'] = self._decode_temp(value_list, 2, 3)
+            if len(value_list) < 34:
+                _LOGGER.debug("Ignoring short status response (%s bytes)", len(value_list))
+                return self.state
+
+            on_state = value_list[30]
+            temp = self._decode_temp(value_list, 2, 3)
+            grill_set_temp = self._decode_temp(value_list, 6, 7)
+            probe1_set_temp = self._decode_temp(value_list, 28, 29)
+            probe2_set_temp = self._decode_temp(value_list, 18, 19)
+
+            if (
+                on_state not in (0, 1, 2)
+                or temp > 650
+                or grill_set_temp > 600
+                or probe1_set_temp > grill.MAX_TEMP_F_PROBE
+                or probe2_set_temp > grill.MAX_TEMP_F_PROBE
+            ):
+                _LOGGER.warning(
+                    "Ignoring out-of-range GMG status packet: on=%s temp=%s set=%s p1_set=%s p2_set=%s",
+                    on_state,
+                    temp,
+                    grill_set_temp,
+                    probe1_set_temp,
+                    probe2_set_temp,
+                )
+                return self.state
+
+            self.state['on'] = on_state
+            self.state['temp'] = temp
             self.state['temp_high'] = value_list[3]
-            self.state['grill_set_temp'] = self._decode_temp(value_list, 6, 7)
+            self.state['grill_set_temp'] = grill_set_temp
             self.state['grill_set_temp_high'] = value_list[7]
 
             # probe 1 stats
             self.state['probe1_temp'] = self._decode_temp(value_list, 4, 5)
             self.state['probe1_temp_high'] = value_list[5]
-            self.state['probe1_set_temp'] = self._decode_temp(value_list, 28, 29)
+            self.state['probe1_set_temp'] = probe1_set_temp
             self.state['probe1_set_temp_high'] = value_list[29]
             self.state['probe1_connected'] = self.state['probe1_temp'] <= grill.MAX_TEMP_F_PROBE
 
             # probe 2 stats
             self.state['probe2_temp'] = self._decode_temp(value_list, 16, 17)
             self.state['probe2_temp_high'] = value_list[17]
-            self.state['probe2_set_temp'] = self._decode_temp(value_list, 18, 19)
+            self.state['probe2_set_temp'] = probe2_set_temp
             self.state['probe2_set_temp_high'] = value_list[19]
             self.state['probe2_connected'] = self.state['probe2_temp'] <= grill.MAX_TEMP_F_PROBE
 

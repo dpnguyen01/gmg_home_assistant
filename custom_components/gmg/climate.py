@@ -307,7 +307,9 @@ class GmgGrillProbe(CoordinatorEntity[GmgDataUpdateCoordinator], ClimateEntity):
 
     @property
     def min_temp(self) -> float:
-        """Return the minimum temperature."""
+        """Return the minimum temperature based on heat vs cold smoke/off mode."""
+        if self._state.get("on") == 1:
+            return self._grill.MIN_TEMP_F_PROBE_HEAT
         return self._grill.MIN_TEMP_F_PROBE
 
     @property
