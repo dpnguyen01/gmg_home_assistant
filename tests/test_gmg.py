@@ -1,11 +1,14 @@
 """Unit and regression tests for the Green Mountain Grill integration."""
 
+import asyncio
+import importlib
 import importlib.util
 import pathlib
+import socket
 import sys
 import types
 import unittest
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 PKG_DIR = ROOT / "custom_components" / "gmg"
@@ -13,23 +16,43 @@ PKG_DIR = ROOT / "custom_components" / "gmg"
 
 def _load_gmg_module():
     """Load gmg.py directly without requiring Home Assistant installed."""
-    spec = importlib.util.spec_from_file_location("custom_components.gmg.gmg", PKG_DIR / "gmg.py")
+    spec = importlib.util.spec_from_file_location(
+        "custom_components.gmg.gmg", PKG_DIR / "gmg.py"
+    )
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
     return mod
 
 
+class _AbortFlow(Exception):
+    """Stub exception mimicking Home Assistant's AbortFlow."""
+
+    def __init__(self, reason: str, updates=None):
+        super().__init__(reason)
+        self.reason = reason
+        self.updates = updates
+
+
 def _install_ha_stubs(gmg_mod):
-    """Install minimal Home Assistant stubs to test climate, sensor, and binary_sensor."""
+    """Install minimal Home Assistant stubs and return a restore callback."""
     ha = types.ModuleType("homeassistant")
     ha_core = types.ModuleType("homeassistant.core")
     ha_core.HomeAssistant = object
+
+    ha_exc = types.ModuleType("homeassistant.exceptions")
+
+    class HomeAssistantError(Exception):
+        """Stub HomeAssistantError."""
+
+    ha_exc.HomeAssistantError = HomeAssistantError
 
     ha_const = types.ModuleType("homeassistant.const")
     ha_const.ATTR_TEMPERATURE = "temperature"
     ha_const.CONF_HOST = "host"
     ha_const.PERCENTAGE = "%"
-    ha_const.Platform = types.SimpleNamespace(SENSOR="sensor", BINARY_SENSOR="binary_sensor")
+    ha_const.Platform = types.SimpleNamespace(
+        CLIMATE="climate", SENSOR="sensor", BINARY_SENSOR="binary_sensor"
+    )
     ha_const.UnitOfTemperature = types.SimpleNamespace(FAHRENHEIT="°F")
 
     ha_comp = types.ModuleType("homeassistant.components")
@@ -41,7 +64,9 @@ def _install_ha_stubs(gmg_mod):
     ha_climate.ClimateEntityFeature = types.SimpleNamespace(
         TARGET_TEMPERATURE=1, TURN_ON=128, TURN_OFF=256
     )
-    ha_climate.HVACMode = types.SimpleNamespace(HEAT="heat", FAN_ONLY="fan_only", OFF="off")
+    ha_climate.HVACMode = types.SimpleNamespace(
+        HEAT="heat", FAN_ONLY="fan_only", OFF="off"
+    )
 
     ha_sensor = types.ModuleType("homeassistant.components.sensor")
     ha_sensor.SensorDeviceClass = types.SimpleNamespace(TEMPERATURE="temperature")
@@ -49,7 +74,9 @@ def _install_ha_stubs(gmg_mod):
     ha_sensor.SensorStateClass = types.SimpleNamespace(MEASUREMENT="measurement")
 
     ha_bs = types.ModuleType("homeassistant.components.binary_sensor")
-    ha_bs.BinarySensorDeviceClass = types.SimpleNamespace(PLUG="plug", PROBLEM="problem")
+    ha_bs.BinarySensorDeviceClass = types.SimpleNamespace(
+        PLUG="plug", PROBLEM="problem"
+    )
     ha_bs.BinarySensorEntity = type("BinarySensorEntity", (), {})
 
     ha_helpers = types.ModuleType("homeassistant.helpers")
@@ -64,14 +91,47 @@ def _install_ha_stubs(gmg_mod):
     ha_ce.ConfigFlowResult = dict
 
     class _BaseConfigFlow:
+        def __init__(self):
+            self._uid = None
+            self._existing_entries = []
+            self._reconfigure_entry = None
+            self.last_abort_updates = None
+
         def __init_subclass__(cls, domain=None, **kwargs):
             cls.domain = domain
 
         async def async_set_unique_id(self, uid):
             self._uid = uid
 
-        def _abort_if_unique_id_configured(self):
-            pass
+        def _async_current_entries(self):
+            return list(self._existing_entries)
+
+        def _get_reconfigure_entry(self):
+            return self._reconfigure_entry
+
+        def _abort_if_unique_id_configured(self, updates=None):
+            self.last_abort_updates = updates
+            for ent in self._existing_entries:
+                if getattr(ent, "unique_id", None) == self._uid:
+                    if updates:
+                        ent.data.update(updates)
+                    raise _AbortFlow("already_configured", updates=updates)
+
+        def _abort_if_unique_id_mismatch(self):
+            if (
+                self._reconfigure_entry is not None
+                and getattr(self._reconfigure_entry, "unique_id", None) != self._uid
+            ):
+                raise _AbortFlow("unique_id_mismatch")
+
+        def async_update_reload_and_abort(self, entry, data_updates=None):
+            if data_updates:
+                entry.data.update(data_updates)
+            return {
+                "type": "abort",
+                "reason": "reconfigure_successful",
+                "data_updates": data_updates,
+            }
 
         def async_create_entry(self, title="", data=None):
             return {"type": "create_entry", "title": title, "data": data}
@@ -91,6 +151,8 @@ def _install_ha_stubs(gmg_mod):
         def __init__(self, hass, logger, name="", update_interval=None):
             self.hass = hass
             self.data = {}
+            self.async_request_refresh = AsyncMock()
+            self.async_refresh = AsyncMock()
 
     class _BaseCoordinatorEntity:
         def __class_getitem__(cls, item):
@@ -98,6 +160,7 @@ def _install_ha_stubs(gmg_mod):
 
         def __init__(self, coordinator):
             self.coordinator = coordinator
+            self.hass = coordinator.hass
 
         @property
         def available(self):
@@ -112,10 +175,14 @@ def _install_ha_stubs(gmg_mod):
     vol.Schema = lambda d: d
     vol.ALLOW_EXTRA = "ALLOW_EXTRA"
 
+    cc_pkg = types.ModuleType("custom_components")
+    cc_pkg.__path__ = [str(ROOT / "custom_components")]
+
     modules = {
         "voluptuous": vol,
         "homeassistant": ha,
         "homeassistant.core": ha_core,
+        "homeassistant.exceptions": ha_exc,
         "homeassistant.const": ha_const,
         "homeassistant.config_entries": ha_ce,
         "homeassistant.components": ha_comp,
@@ -126,16 +193,33 @@ def _install_ha_stubs(gmg_mod):
         "homeassistant.helpers.config_validation": ha_cv,
         "homeassistant.helpers.device_registry": ha_dr,
         "homeassistant.helpers.update_coordinator": ha_uc,
+        "custom_components": cc_pkg,
+        "custom_components.gmg.gmg": gmg_mod,
     }
+
+    submodules_to_clear = [
+        "custom_components.gmg",
+        "custom_components.gmg.const",
+        "custom_components.gmg.coordinator",
+        "custom_components.gmg.climate",
+        "custom_components.gmg.sensor",
+        "custom_components.gmg.binary_sensor",
+        "custom_components.gmg.config_flow",
+    ]
+
+    saved = {k: sys.modules.get(k) for k in list(modules) + submodules_to_clear}
+    for k in submodules_to_clear:
+        sys.modules.pop(k, None)
     sys.modules.update(modules)
 
-    cc_pkg = types.ModuleType("custom_components")
-    cc_pkg.__path__ = [str(ROOT / "custom_components")]
-    gmg_pkg = types.ModuleType("custom_components.gmg")
-    gmg_pkg.__path__ = [str(PKG_DIR)]
-    sys.modules["custom_components"] = cc_pkg
-    sys.modules["custom_components.gmg"] = gmg_pkg
-    sys.modules["custom_components.gmg.gmg"] = gmg_mod
+    def _restore():
+        for k, orig in saved.items():
+            if orig is None:
+                sys.modules.pop(k, None)
+            else:
+                sys.modules[k] = orig
+
+    return _restore
 
 
 def _make_status_packet(
@@ -165,7 +249,7 @@ def _make_status_packet(
 
 
 class TestGmgProtocol(unittest.TestCase):
-    """Test GMG UDP protocol parsing, commands, and retries."""
+    """Test GMG UDP protocol parsing, commands, discovery, and retries."""
 
     @classmethod
     def setUpClass(cls):
@@ -199,7 +283,7 @@ class TestGmgProtocol(unittest.TestCase):
         self.assertEqual(state["fireStatePercentage"], 45)
         self.assertEqual(state["warnState"], 0)
 
-    def test_status_stops_after_first_response(self):
+    def test_status_stops_after_first_response_and_retries_short_packets(self):
         pkt = _make_status_packet(pit=225, on=1)
         g = self.gmg.grill("192.168.68.80", "GMG12148258")
         with patch.object(g, "send", return_value=pkt) as mock_send:
@@ -207,12 +291,65 @@ class TestGmgProtocol(unittest.TestCase):
         self.assertEqual(mock_send.call_count, 1)
         self.assertEqual(state["temp"], 225)
 
-    def test_status_returns_empty_dict_on_all_timeouts(self):
+        with patch.object(
+            g, "send", side_effect=[b"OK!", _make_status_packet(pit=601, grill_set=65535), pkt]
+        ) as mock_send:
+            state = g.status()
+        self.assertEqual(mock_send.call_count, 3)
+        self.assertEqual(state["temp"], 225)
+
+    def test_status_returns_empty_dict_on_all_timeouts_or_bad_packets(self):
         g = self.gmg.grill("192.168.68.80", "GMG12148258")
         with patch.object(g, "send", return_value=None) as mock_send:
             state = g.status()
         self.assertEqual(mock_send.call_count, 5)
         self.assertEqual(state, {})
+
+        with patch.object(g, "send", return_value=b"OK!") as mock_send:
+            state = g.status()
+        self.assertEqual(mock_send.call_count, 5)
+        self.assertEqual(state, {})
+
+    def test_send_validates_sender_ip(self):
+        g = self.gmg.grill(" 192.168.68.80 ", "GMG12148258")
+        self.assertEqual(g.ip, "192.168.68.80")
+
+        fake_sock = MagicMock()
+        fake_sock.recvfrom.return_value = (b"GMG12148258", ("192.168.68.99", 8080))
+        with patch.object(self.gmg.socket, "socket", return_value=fake_sock):
+            self.assertIsNone(g.send(b"UL!"))
+
+        fake_sock.recvfrom.return_value = (b"GMG12148258", ("192.168.68.80", 8080))
+        with patch.object(self.gmg.socket, "socket", return_value=fake_sock):
+            self.assertEqual(g.send(b"UL!"), b"GMG12148258")
+
+    def test_grills_broadcast_handles_oserror_and_non_utf8(self):
+        err_sock = MagicMock()
+        err_sock.sendto.side_effect = OSError("Network is unreachable")
+
+        ok_sock = MagicMock()
+        ok_sock.recvfrom.side_effect = [
+            (b"\x00\x00\xf5\x01", ("192.168.68.80", 8080)),
+            (b"GMG12148258", ("192.168.68.80", 8080)),
+            (b"GMG12148258", ("192.168.68.80", 8080)),
+            socket.timeout(),
+        ]
+
+        with (
+            patch.object(
+                self.gmg.socket,
+                "getaddrinfo",
+                return_value=[(None, None, None, None, ("127.0.0.1", 0))],
+            ),
+            patch.object(
+                self.gmg.socket, "socket", side_effect=[err_sock, ok_sock]
+            ),
+        ):
+            found = self.gmg.grills(timeout=0.1)
+
+        self.assertEqual(len(found), 1)
+        self.assertEqual(found[0].serial_number, "GMG12148258")
+        self.assertEqual(found[0].ip, "192.168.68.80")
 
     def test_grill_by_host(self):
         with patch.object(self.gmg.grill, "send", return_value=b"GMG12148258"):
@@ -251,6 +388,8 @@ class TestGmgProtocol(unittest.TestCase):
             g.set_temp_probe(31, 1)
         with self.assertRaises(ValueError):
             g.set_temp_probe(258, 2)
+        with self.assertRaises(ValueError):
+            g.set_temp_probe(165, 3)
 
     def test_corrupted_out_of_range_status_packets_are_rejected(self):
         g = self.gmg.grill("192.168.68.80", "GMG12148258")
@@ -267,20 +406,40 @@ class TestGmgProtocol(unittest.TestCase):
 
 
 class TestGmgEntities(unittest.TestCase):
-    """Test climate, sensor, and binary_sensor entity behavior."""
+    """Test climate, sensor, binary_sensor, coordinator, and config_flow behavior."""
 
     @classmethod
     def setUpClass(cls):
         cls.gmg = _load_gmg_module()
-        _install_ha_stubs(cls.gmg)
+        cls._restore_modules = _install_ha_stubs(cls.gmg)
         cls.climate = importlib.import_module("custom_components.gmg.climate")
         cls.sensor = importlib.import_module("custom_components.gmg.sensor")
-        cls.binary_sensor = importlib.import_module("custom_components.gmg.binary_sensor")
-        cls.coordinator_mod = importlib.import_module("custom_components.gmg.coordinator")
+        cls.binary_sensor = importlib.import_module(
+            "custom_components.gmg.binary_sensor"
+        )
+        cls.coordinator_mod = importlib.import_module(
+            "custom_components.gmg.coordinator"
+        )
+        cls.ha_exc = importlib.import_module("homeassistant.exceptions")
 
-    def _make_coordinator(self, pkt: bytes):
+    @classmethod
+    def tearDownClass(cls):
+        cls._restore_modules()
+
+    def _make_hass(self):
+        fake_hass = MagicMock()
+
+        async def _run_exec(fn, *args):
+            return fn(*args)
+
+        fake_hass.async_add_executor_job = _run_exec
+        return fake_hass
+
+    def _make_coordinator(self, pkt: bytes, grill_name=None):
         g = self.gmg.grill("192.168.68.80", "GMG12148258")
-        coord = self.coordinator_mod.GmgDataUpdateCoordinator(MagicMock(), g)
+        coord = self.coordinator_mod.GmgDataUpdateCoordinator(
+            self._make_hass(), g, grill_name=grill_name
+        )
         coord.data = g.gmg_status_response(list(pkt)) if pkt else {}
         return coord
 
@@ -303,21 +462,33 @@ class TestGmgEntities(unittest.TestCase):
         probe2_ent = self.climate.GmgGrillProbe(coord, 2)
 
         self.assertTrue(grill_ent.available)
+        self.assertTrue(grill_ent._attr_has_entity_name)
+        self.assertIsNone(grill_ent._attr_name)
         self.assertEqual(grill_ent.hvac_mode, "heat")
         self.assertEqual(grill_ent.native_current_temperature, 275)
         self.assertEqual(grill_ent.native_target_temperature, 275)
         self.assertEqual(grill_ent.target_temperature_step, 5)
         self.assertEqual(probe1_ent.target_temperature_step, 1)
 
+        self.assertIn(probe1_ent.hvac_mode, probe1_ent.hvac_modes)
         self.assertEqual(probe1_ent.hvac_mode, "heat")
         self.assertEqual(probe1_ent.native_current_temperature, 62)
         self.assertEqual(probe1_ent.native_target_temperature, 165)
         self.assertEqual(probe1_ent.min_temp, 100)
 
+        self.assertIn(probe2_ent.hvac_mode, probe2_ent.hvac_modes)
         self.assertEqual(probe2_ent.hvac_mode, "off")
         self.assertIsNone(probe2_ent.native_current_temperature)
         self.assertIsNone(probe2_ent.native_target_temperature)
         self.assertEqual(probe2_ent.min_temp, 100)
+
+        # Connected probe with unset target (0) returns None instead of 0
+        coord_unset = self._make_coordinator(
+            _make_status_packet(pit=275, probe1=70, probe1_set=0, on=1)
+        )
+        probe1_unset = self.climate.GmgGrillProbe(coord_unset, 1)
+        self.assertIsNone(probe1_unset.native_target_temperature)
+        asyncio.run(probe1_unset.async_set_hvac_mode("off"))
 
         fire_state = self.sensor.GmgFireStateSensor(coord)
         fire_pct = self.sensor.GmgFirePercentageSensor(coord)
@@ -339,6 +510,44 @@ class TestGmgEntities(unittest.TestCase):
         self.assertFalse(p2_conn.is_on)
         self.assertTrue(warn_bin.is_on)
 
+    def test_climate_commands_and_validation_errors(self):
+        HomeAssistantError = self.ha_exc.HomeAssistantError
+
+        # Off grill rejects pit & probe temperature changes with HomeAssistantError
+        coord_off = self._make_coordinator(_make_status_packet(pit=70, on=0))
+        grill_off = self.climate.GmgGrill(coord_off)
+        probe_off = self.climate.GmgGrillProbe(coord_off, 1)
+        with self.assertRaises(HomeAssistantError):
+            asyncio.run(grill_off.async_set_temperature(temperature=225))
+        with self.assertRaises(HomeAssistantError):
+            asyncio.run(probe_off.async_set_temperature(temperature=165))
+
+        # Cold startup (fire_state=2, pit=110 < 145) rejects pit set_temp
+        coord_startup = self._make_coordinator(
+            _make_status_packet(pit=110, on=1, fire_state=2)
+        )
+        grill_startup = self.climate.GmgGrill(coord_startup)
+        with self.assertRaises(HomeAssistantError):
+            asyncio.run(grill_startup.async_set_temperature(temperature=225))
+
+        # Running state (fire_state=3) allows pit set_temp even if pit dipped < 145 F
+        coord_running = self._make_coordinator(
+            _make_status_packet(pit=138, grill_set=225, probe1=80, on=1, fire_state=3)
+        )
+        grill_running = self.climate.GmgGrill(coord_running)
+        probe_running = self.climate.GmgGrillProbe(coord_running, 1)
+        with patch.object(coord_running.grill, "send", return_value=b"OK") as mock_send:
+            asyncio.run(grill_running.async_set_temperature(temperature=250))
+            mock_send.assert_called_with(b"UT250!")
+            asyncio.run(probe_running.async_set_temperature(temperature=165))
+            mock_send.assert_called_with(b"UF165!")
+            asyncio.run(grill_running.async_set_hvac_mode("fan_only"))
+            mock_send.assert_called_with(b"UK002!")
+            asyncio.run(grill_running.async_turn_off())
+            mock_send.assert_called_with(b"UK004!")
+            asyncio.run(grill_running.async_turn_on())
+            mock_send.assert_called_with(b"UK001!")
+
     def test_entities_unavailable_when_grill_offline(self):
         coord = self._make_coordinator(b"")
         grill_ent = self.climate.GmgGrill(coord)
@@ -351,7 +560,7 @@ class TestGmgEntities(unittest.TestCase):
 
     def test_cold_smoke_mode_and_device_info(self):
         pkt = _make_status_packet(pit=75, on=2, fire_state=0)
-        coord = self._make_coordinator(pkt)
+        coord = self._make_coordinator(pkt, grill_name="Patio Smoker")
 
         grill_ent = self.climate.GmgGrill(coord)
         probe1_ent = self.climate.GmgGrillProbe(coord, 1)
@@ -362,20 +571,14 @@ class TestGmgEntities(unittest.TestCase):
         self.assertEqual(probe1_ent.min_temp, 32)
         expected_ids = {("gmg", "GMG12148258")}
         self.assertEqual(grill_ent._attr_device_info["identifiers"], expected_ids)
+        self.assertEqual(grill_ent._attr_device_info["name"], "Patio Smoker")
         self.assertEqual(fire_state._attr_device_info["identifiers"], expected_ids)
         self.assertEqual(p1_conn._attr_device_info["identifiers"], expected_ids)
 
-    def test_config_flow_user_and_import(self):
-        import asyncio
+    def test_config_flow_user_import_and_reconfigure(self):
         cf_mod = importlib.import_module("custom_components.gmg.config_flow")
         flow = cf_mod.GmgConfigFlow()
-        fake_hass = MagicMock()
-
-        async def _run_exec(fn, *args):
-            return fn(*args)
-
-        fake_hass.async_add_executor_job = _run_exec
-        flow.hass = fake_hass
+        flow.hass = self._make_hass()
 
         with patch.object(
             cf_mod,
@@ -387,32 +590,78 @@ class TestGmgEntities(unittest.TestCase):
             self.assertEqual(res["title"], "GMG12148258")
             self.assertEqual(res["data"]["host"], "192.168.68.80")
 
-            imp = asyncio.run(flow.async_step_import({"host": "192.168.68.80"}))
+            imp = asyncio.run(
+                flow.async_step_import(
+                    {"host": "192.168.68.80", "grill_name": "Backyard GMG"}
+                )
+            )
             self.assertEqual(imp["type"], "create_entry")
+            self.assertEqual(imp["title"], "Backyard GMG")
+            self.assertEqual(imp["data"]["grill_name"], "Backyard GMG")
             self.assertEqual(imp["data"]["serial_number"], "GMG12148258")
+
+        # Existing entry short-circuits YAML import without network discovery
+        existing_entry = types.SimpleNamespace(
+            unique_id="GMG12148258", data={"host": "192.168.68.80"}
+        )
+        flow._existing_entries = [existing_entry]
+        with patch.object(cf_mod, "grill_by_host") as mock_discover:
+            short = asyncio.run(flow.async_step_import({"host": "192.168.68.80"}))
+            self.assertEqual(short["type"], "abort")
+            self.assertEqual(short["reason"], "already_configured")
+            mock_discover.assert_not_called()
+
+        # Reconfigure updates IP address when serial matches, aborts on mismatch
+        flow._existing_entries = []
+        flow._reconfigure_entry = existing_entry
+        with patch.object(
+            cf_mod,
+            "grill_by_host",
+            return_value=self.gmg.grill("192.168.68.95", "GMG12148258"),
+        ):
+            reconf = asyncio.run(
+                flow.async_step_reconfigure({"host": "192.168.68.95"})
+            )
+            self.assertEqual(reconf["reason"], "reconfigure_successful")
+            self.assertEqual(existing_entry.data["host"], "192.168.68.95")
+
+        with patch.object(
+            cf_mod,
+            "grill_by_host",
+            return_value=self.gmg.grill("192.168.68.99", "GMG99999999"),
+        ):
+            with self.assertRaises(_AbortFlow) as ctx:
+                asyncio.run(flow.async_step_reconfigure({"host": "192.168.68.99"}))
+            self.assertEqual(ctx.exception.reason, "unique_id_mismatch")
 
         with patch.object(cf_mod, "grill_by_host", return_value=None):
             err = asyncio.run(flow.async_step_user({"host": "192.168.68.80"}))
             self.assertEqual(err["type"], "form")
             self.assertEqual(err["errors"]["base"], "cannot_connect")
 
-    def test_coordinator_filters_single_poll_pit_and_probe_spikes(self):
+    def test_coordinator_filters_spikes_and_allows_fast_ramps(self):
         g = self.gmg.grill("192.168.68.80", "GMG12148258")
-        coord = self.coordinator_mod.GmgDataUpdateCoordinator(MagicMock(), g)
+        coord = self.coordinator_mod.GmgDataUpdateCoordinator(self._make_hass(), g)
 
-        # Baseline reading
-        s1 = coord._filter_spikes(
-            g.gmg_status_response(list(_make_status_packet(pit=245, probe1=102, on=1)))
-        )
+        # Baseline reading (ensure input dict is not mutated in place)
+        raw1 = g.gmg_status_response(list(_make_status_packet(pit=245, probe1=102, on=1)))
+        s1 = coord._filter_spikes(raw1)
         self.assertEqual(s1["temp"], 245)
         self.assertEqual(s1["probe1_temp"], 102)
 
         # Single-poll spikes on both pit (245 -> 380) and probe 1 (102 -> 180)
-        s2 = coord._filter_spikes(
-            g.gmg_status_response(list(_make_status_packet(pit=380, probe1=180, on=1)))
-        )
+        raw2 = g.gmg_status_response(list(_make_status_packet(pit=380, probe1=180, on=1)))
+        s2 = coord._filter_spikes(raw2)
+        self.assertEqual(raw2["temp"], 380)  # original not mutated
         self.assertEqual(s2["temp"], 245)
         self.assertEqual(s2["probe1_temp"], 102)
+
+        # Two consecutive wild spikes (380 -> 520) still suppressed
+        s2b = coord._filter_spikes(
+            g.gmg_status_response(list(_make_status_packet(pit=520, probe1=240, on=1)))
+        )
+        self.assertEqual(s2b["temp"], 245)
+        self.assertEqual(s2b["probe1_temp"], 102)
 
         # Next poll returns to normal -> spikes were never exposed
         s3 = coord._filter_spikes(
@@ -421,57 +670,48 @@ class TestGmgEntities(unittest.TestCase):
         self.assertEqual(s3["temp"], 246)
         self.assertEqual(s3["probe1_temp"], 106)
 
-        # Two consecutive polls at a genuinely new level are accepted
-        s4 = coord._filter_spikes(
-            g.gmg_status_response(list(_make_status_packet(pit=246, probe1=130, on=1)))
-        )
-        self.assertEqual(s4["probe1_temp"], 106)
-        s5 = coord._filter_spikes(
-            g.gmg_status_response(list(_make_status_packet(pit=246, probe1=131, on=1)))
-        )
-        self.assertEqual(s5["probe1_temp"], 131)
-
-        # Unplugging and re-plugging resets baseline
+        # Unplugging and re-plugging resets baseline, then fast monotonic probe ramp
+        # (70 -> 95 -> 120 -> 145, +25 F per poll > 15 F threshold) does NOT freeze!
         coord._filter_spikes(
             g.gmg_status_response(list(_make_status_packet(pit=246, probe1=601, on=1)))
         )
-        s6 = coord._filter_spikes(
-            g.gmg_status_response(list(_make_status_packet(pit=246, probe1=75, on=1)))
+        r0 = coord._filter_spikes(
+            g.gmg_status_response(list(_make_status_packet(pit=246, probe1=70, on=1)))
         )
-        self.assertEqual(s6["probe1_temp"], 75)
+        self.assertEqual(r0["probe1_temp"], 70)
+        r1 = coord._filter_spikes(
+            g.gmg_status_response(list(_make_status_packet(pit=246, probe1=95, on=1)))
+        )
+        self.assertEqual(r1["probe1_temp"], 70)  # 1st jump held pending confirmation
+        r2 = coord._filter_spikes(
+            g.gmg_status_response(list(_make_status_packet(pit=246, probe1=120, on=1)))
+        )
+        self.assertEqual(r2["probe1_temp"], 120)  # Ramp confirmed!
+        r3 = coord._filter_spikes(
+            g.gmg_status_response(list(_make_status_packet(pit=246, probe1=145, on=1)))
+        )
+        self.assertEqual(r3["probe1_temp"], 145)  # Continues smoothly without stair-step!
 
     def test_coordinator_holds_state_across_transient_missed_polls(self):
-        import asyncio
-
         g = self.gmg.grill("192.168.68.80", "GMG12148258")
-        fake_hass = MagicMock()
-
-        async def _run_exec(fn, *args):
-            return fn(*args)
-
-        fake_hass.async_add_executor_job = _run_exec
-        coord = self.coordinator_mod.GmgDataUpdateCoordinator(fake_hass, g)
+        coord = self.coordinator_mod.GmgDataUpdateCoordinator(self._make_hass(), g)
 
         valid_state = g.gmg_status_response(list(_make_status_packet(pit=275, on=1)))
 
-        # Initial valid poll
         with patch.object(g, "status", return_value=valid_state):
             coord.data = asyncio.run(coord._async_update_data())
         self.assertEqual(coord.data["temp"], 275)
 
-        # 1st and 2nd missed/empty polls hold last known state
         with patch.object(g, "status", return_value={}):
             coord.data = asyncio.run(coord._async_update_data())
             self.assertEqual(coord.data["temp"], 275)
             coord.data = asyncio.run(coord._async_update_data())
             self.assertEqual(coord.data["temp"], 275)
 
-        # Recovery resets missed poll counter
         with patch.object(g, "status", return_value=valid_state):
             coord.data = asyncio.run(coord._async_update_data())
         self.assertEqual(coord._missed_polls, 0)
 
-        # MAX_MISSED_POLLS consecutive empty polls mark grill offline
         with patch.object(g, "status", return_value={}):
             for _ in range(self.coordinator_mod.MAX_MISSED_POLLS - 1):
                 coord.data = asyncio.run(coord._async_update_data())
@@ -479,6 +719,7 @@ class TestGmgEntities(unittest.TestCase):
             coord.data = asyncio.run(coord._async_update_data())
             self.assertEqual(coord.data, {})
             self.assertEqual(coord._last_valid_temps, {})
+            self.assertEqual(coord._ramp_directions, {})
 
 
 if __name__ == "__main__":

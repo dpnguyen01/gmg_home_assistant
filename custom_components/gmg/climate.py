@@ -18,10 +18,11 @@ from homeassistant.const import (
     UnitOfTemperature,
 )
 from homeassistant.core import HomeAssistant
+from homeassistant.exceptions import HomeAssistantError
 import homeassistant.helpers.config_validation as cv
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
-from .const import DOMAIN
+from .const import CONF_GRILL_NAME, DOMAIN, FIRE_STATE_RUNNING
 from .coordinator import GmgDataUpdateCoordinator
 
 _LOGGER = logging.getLogger(__name__)
@@ -29,7 +30,7 @@ _LOGGER = logging.getLogger(__name__)
 PLATFORM_SCHEMA = PLATFORM_SCHEMA.extend(
     {
         vol.Optional(CONF_HOST): cv.string,
-        vol.Optional("grill_name"): cv.string,
+        vol.Optional(CONF_GRILL_NAME): cv.string,
     },
     extra=vol.ALLOW_EXTRA,
 )
@@ -62,6 +63,8 @@ async def async_setup_entry(
 class GmgGrill(CoordinatorEntity[GmgDataUpdateCoordinator], ClimateEntity):
     """Representation of a Green Mountain Grill smoker."""
 
+    _attr_has_entity_name = True
+    _attr_name = None
     _enable_turn_on_off_backwards_compatibility = False
 
     def __init__(self, coordinator: GmgDataUpdateCoordinator) -> None:
@@ -89,15 +92,18 @@ class GmgGrill(CoordinatorEntity[GmgDataUpdateCoordinator], ClimateEntity):
             return
 
         if self._state.get("on", 0) == 0:
-            _LOGGER.warning("Grill is not on, cannot set temperature")
-            return
-
-        if self._state.get("temp", 0) < 145:
-            _LOGGER.warning(
-                "Grill is not 150 F, cannot set temperature. Temp is %s",
-                self._state.get("temp"),
+            raise HomeAssistantError(
+                "Grill is not on; power on the grill before setting target temperature."
             )
-            return
+
+        if (
+            self._state.get("temp", 0) < 145
+            and self._state.get("fireState") != FIRE_STATE_RUNNING
+        ):
+            raise HomeAssistantError(
+                f"Grill is still warming up ({self._state.get('temp')} °F); "
+                "wait for startup to finish before changing target temperature."
+            )
 
         try:
             _LOGGER.debug("Setting temperature to %s", temperature)
@@ -105,8 +111,11 @@ class GmgGrill(CoordinatorEntity[GmgDataUpdateCoordinator], ClimateEntity):
                 self._grill.set_temp, int(temperature)
             )
             await self.coordinator.async_request_refresh()
-        except Exception:
+        except ValueError as err:
+            raise HomeAssistantError(str(err)) from err
+        except Exception as err:
             _LOGGER.exception("Error setting temperature: %s", temperature)
+            raise HomeAssistantError(f"Failed to set grill temperature: {err}") from err
 
     async def async_set_hvac_mode(self, hvac_mode: HVACMode) -> None:
         """Set the operation mode."""
@@ -161,11 +170,6 @@ class GmgGrill(CoordinatorEntity[GmgDataUpdateCoordinator], ClimateEntity):
         return HVACMode.OFF
 
     @property
-    def name(self) -> str:
-        """Return unique ID of grill which is GMGSERIAL_NUMBER."""
-        return self._unique_id
-
-    @property
     def native_temperature_unit(self) -> str:
         """Return the unit of measurement for the grill."""
         return UnitOfTemperature.FAHRENHEIT
@@ -204,6 +208,7 @@ class GmgGrill(CoordinatorEntity[GmgDataUpdateCoordinator], ClimateEntity):
 class GmgGrillProbe(CoordinatorEntity[GmgDataUpdateCoordinator], ClimateEntity):
     """Representation of a Green Mountain Grill smoker food probe."""
 
+    _attr_has_entity_name = True
     _enable_turn_on_off_backwards_compatibility = False
 
     def __init__(
@@ -214,6 +219,7 @@ class GmgGrillProbe(CoordinatorEntity[GmgDataUpdateCoordinator], ClimateEntity):
         self._grill = coordinator.grill
         self._probe_count = probe_count
         self._unique_id = f"{self._grill.serial_number}_probe_{probe_count}"
+        self._attr_name = f"Probe {probe_count}"
         self._attr_device_info = coordinator.device_info
 
     @property
@@ -238,8 +244,9 @@ class GmgGrillProbe(CoordinatorEntity[GmgDataUpdateCoordinator], ClimateEntity):
             return
 
         if self._state.get("on", 0) == 0:
-            _LOGGER.error("Grill is not on, cannot set temperature")
-            return
+            raise HomeAssistantError(
+                "Grill is not on; power on the grill before setting probe temperature."
+            )
 
         try:
             _LOGGER.debug("Setting probe %s temperature to %s", self._probe_count, temperature)
@@ -247,13 +254,24 @@ class GmgGrillProbe(CoordinatorEntity[GmgDataUpdateCoordinator], ClimateEntity):
                 self._grill.set_temp_probe, int(temperature), self._probe_count
             )
             await self.coordinator.async_request_refresh()
-        except Exception:
+        except ValueError as err:
+            raise HomeAssistantError(str(err)) from err
+        except Exception as err:
             _LOGGER.exception("Error setting probe temperature: %s", temperature)
+            raise HomeAssistantError(f"Failed to set probe temperature: {err}") from err
+
+    async def async_set_hvac_mode(self, hvac_mode: HVACMode) -> None:
+        """Handle HVAC mode requests gracefully (probe state follows grill power and plug state)."""
+        _LOGGER.debug(
+            "Ignoring set_hvac_mode(%s) on probe %s; probe mode is read-only",
+            hvac_mode,
+            self._probe_count,
+        )
 
     @property
     def hvac_modes(self) -> List[HVACMode]:
         """Return the supported operations."""
-        return [HVACMode.OFF]
+        return [HVACMode.HEAT, HVACMode.OFF]
 
     @property
     def hvac_mode(self) -> HVACMode:
@@ -270,11 +288,6 @@ class GmgGrillProbe(CoordinatorEntity[GmgDataUpdateCoordinator], ClimateEntity):
     @property
     def icon(self) -> str:
         return "mdi:thermometer-lines"
-
-    @property
-    def name(self) -> str:
-        """Return unique ID of grill probe."""
-        return self._unique_id
 
     @property
     def native_temperature_unit(self) -> str:
@@ -295,10 +308,13 @@ class GmgGrillProbe(CoordinatorEntity[GmgDataUpdateCoordinator], ClimateEntity):
 
     @property
     def native_target_temperature(self) -> Optional[float]:
-        """Return what the temp is set to go to."""
+        """Return what the temp is set to go to, or None when unplugged/unset."""
         if not self._is_connected:
             return None
-        return self._state.get(f"probe{self._probe_count}_set_temp")
+        target = self._state.get(f"probe{self._probe_count}_set_temp")
+        if not target:
+            return None
+        return target
 
     @property
     def max_temp(self) -> float:

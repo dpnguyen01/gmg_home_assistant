@@ -34,6 +34,8 @@ async def async_setup_entry(
 class GmgBaseSensor(CoordinatorEntity[GmgDataUpdateCoordinator], SensorEntity):
     """Base sensor for GMG grill."""
 
+    _attr_has_entity_name = True
+
     def __init__(self, coordinator: GmgDataUpdateCoordinator) -> None:
         super().__init__(coordinator)
         self._serial = coordinator.grill.serial_number
@@ -52,11 +54,11 @@ class GmgFireStateSensor(GmgBaseSensor):
     """Fire state sensor for GMG grill."""
 
     _attr_icon = "mdi:fire"
+    _attr_name = "Fire State"
 
     def __init__(self, coordinator: GmgDataUpdateCoordinator) -> None:
         super().__init__(coordinator)
         self._attr_unique_id = f"{self._serial}_fire_state"
-        self._attr_name = f"{self._serial} Fire State"
 
     @property
     def native_value(self) -> Optional[str]:
@@ -74,13 +76,13 @@ class GmgFirePercentageSensor(GmgBaseSensor):
     """Fire percentage (auger/fan duty) sensor for GMG grill."""
 
     _attr_icon = "mdi:fire-circle"
+    _attr_name = "Fire Percentage"
     _attr_native_unit_of_measurement = PERCENTAGE
     _attr_state_class = SensorStateClass.MEASUREMENT
 
     def __init__(self, coordinator: GmgDataUpdateCoordinator) -> None:
         super().__init__(coordinator)
         self._attr_unique_id = f"{self._serial}_fire_percentage"
-        self._attr_name = f"{self._serial} Fire Percentage"
 
     @property
     def native_value(self) -> Optional[int]:
@@ -91,11 +93,11 @@ class GmgWarnStateSensor(GmgBaseSensor):
     """Warning state sensor for GMG grill."""
 
     _attr_icon = "mdi:alert-outline"
+    _attr_name = "Warning State"
 
     def __init__(self, coordinator: GmgDataUpdateCoordinator) -> None:
         super().__init__(coordinator)
         self._attr_unique_id = f"{self._serial}_warn_state"
-        self._attr_name = f"{self._serial} Warning State"
 
     @property
     def native_value(self) -> Optional[str]:
@@ -123,7 +125,7 @@ class GmgProbeTemperatureSensor(GmgBaseSensor):
         super().__init__(coordinator)
         self._probe_number = probe_number
         self._attr_unique_id = f"{self._serial}_probe_{probe_number}_temperature"
-        self._attr_name = f"{self._serial} Probe {probe_number} Temperature"
+        self._attr_name = f"Probe {probe_number} Temperature"
 
     @property
     def native_value(self) -> Optional[int]:

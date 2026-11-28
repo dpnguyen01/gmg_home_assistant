@@ -19,7 +19,12 @@ MAX_MISSED_POLLS = 3
 class GmgDataUpdateCoordinator(DataUpdateCoordinator[dict]):
     """Class to manage fetching GMG grill data from a single UDP poll."""
 
-    def __init__(self, hass: HomeAssistant, gmg_grill: grill) -> None:
+    def __init__(
+        self,
+        hass: HomeAssistant,
+        gmg_grill: grill,
+        grill_name: str | None = None,
+    ) -> None:
         """Initialize the coordinator."""
         super().__init__(
             hass,
@@ -30,16 +35,17 @@ class GmgDataUpdateCoordinator(DataUpdateCoordinator[dict]):
         self.grill = gmg_grill
         self.device_info = DeviceInfo(
             identifiers={(DOMAIN, gmg_grill.serial_number)},
-            name=gmg_grill.serial_number,
+            name=grill_name or gmg_grill.serial_number,
             manufacturer="Green Mountain Grills",
             model="GMG Pellet Grill",
         )
         self._last_valid_temps: dict[str, int] = {}
         self._pending_spikes: dict[str, int] = {}
+        self._ramp_directions: dict[str, int] = {}
         self._missed_polls = 0
 
     def _filter_temp_key(self, state: dict, key: str, max_delta: int) -> None:
-        """Suppress single-poll temperature spikes by requiring 2 consecutive polls for large jumps."""
+        """Suppress single-poll temperature spikes while allowing sustained fast ramps."""
         val = state.get(key)
         if val is None:
             return
@@ -48,17 +54,33 @@ class GmgDataUpdateCoordinator(DataUpdateCoordinator[dict]):
         if prev is None:
             self._last_valid_temps[key] = val
             self._pending_spikes.pop(key, None)
+            self._ramp_directions.pop(key, None)
             return
 
         if abs(val - prev) <= max_delta:
             self._last_valid_temps[key] = val
             self._pending_spikes.pop(key, None)
+            self._ramp_directions.pop(key, None)
             return
 
         pending = self._pending_spikes.get(key)
-        if pending is not None and abs(val - pending) <= max_delta:
+        if pending is not None:
+            direction = 1 if pending > prev else -1
+            if abs(val - pending) <= max_delta or (
+                (val - prev) * direction > 0 and abs(val - pending) <= max_delta * 2
+            ):
+                self._last_valid_temps[key] = val
+                self._pending_spikes.pop(key, None)
+                self._ramp_directions[key] = direction
+                return
+
+        ramp_dir = self._ramp_directions.get(key)
+        if (
+            ramp_dir is not None
+            and (val - prev) * ramp_dir > 0
+            and abs(val - prev) <= max_delta * 2
+        ):
             self._last_valid_temps[key] = val
-            self._pending_spikes.pop(key, None)
             return
 
         _LOGGER.debug(
@@ -68,6 +90,7 @@ class GmgDataUpdateCoordinator(DataUpdateCoordinator[dict]):
             val,
             prev,
         )
+        self._ramp_directions.pop(key, None)
         self._pending_spikes[key] = val
         state[key] = prev
 
@@ -76,17 +99,19 @@ class GmgDataUpdateCoordinator(DataUpdateCoordinator[dict]):
         if not state:
             return state
 
-        self._filter_temp_key(state, "temp", max_delta=35)
+        filtered = dict(state)
+        self._filter_temp_key(filtered, "temp", max_delta=35)
 
         for probe_idx in (1, 2):
             key = f"probe{probe_idx}_temp"
-            if state.get(f"probe{probe_idx}_connected"):
-                self._filter_temp_key(state, key, max_delta=15)
+            if filtered.get(f"probe{probe_idx}_connected"):
+                self._filter_temp_key(filtered, key, max_delta=15)
             else:
                 self._last_valid_temps.pop(key, None)
                 self._pending_spikes.pop(key, None)
+                self._ramp_directions.pop(key, None)
 
-        return state
+        return filtered
 
     async def _async_update_data(self) -> dict:
         """Fetch latest status from the grill."""
@@ -104,6 +129,7 @@ class GmgDataUpdateCoordinator(DataUpdateCoordinator[dict]):
 
             self._last_valid_temps.clear()
             self._pending_spikes.clear()
+            self._ramp_directions.clear()
             return {}
 
         self._missed_polls = 0

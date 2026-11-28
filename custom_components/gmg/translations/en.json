@@ -7,6 +7,13 @@
         "data": {
           "host": "IP Address (optional)"
         }
+      },
+      "reconfigure": {
+        "title": "Reconfigure Green Mountain Grill",
+        "description": "Update your grill's IP address, or leave blank to auto-discover on your local network via UDP port 8080.",
+        "data": {
+          "host": "IP Address (optional)"
+        }
       }
     },
     "error": {
@@ -14,7 +21,9 @@
     },
     "abort": {
       "already_configured": "This grill is already configured.",
-      "cannot_connect": "Could not discover or connect to a Green Mountain Grill during import."
+      "cannot_connect": "Could not discover or connect to a Green Mountain Grill during import.",
+      "reconfigure_successful": "Grill IP address updated successfully.",
+      "unique_id_mismatch": "The discovered grill serial number does not match this configuration entry."
     }
   }
 }

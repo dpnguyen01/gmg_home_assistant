@@ -1,0 +1,28 @@
+name: Tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Validate JSON metadata
+        run: |
+          python -c "
+          import json, pathlib
+          for p in ['hacs.json', 'custom_components/gmg/manifest.json', 'custom_components/gmg/strings.json', 'custom_components/gmg/translations/en.json']:
+              json.loads(pathlib.Path(p).read_text(encoding='utf-8'))
+          "
+      - name: Run unit tests
+        run: python -m unittest discover -s tests -t . -v

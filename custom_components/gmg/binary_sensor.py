@@ -30,6 +30,8 @@ class GmgBaseBinarySensor(
 ):
     """Base binary sensor for GMG grill."""
 
+    _attr_has_entity_name = True
+
     def __init__(self, coordinator: GmgDataUpdateCoordinator) -> None:
         super().__init__(coordinator)
         self._serial = coordinator.grill.serial_number
@@ -55,7 +57,7 @@ class GmgProbeConnectedBinarySensor(GmgBaseBinarySensor):
         super().__init__(coordinator)
         self._probe_number = probe_number
         self._attr_unique_id = f"{self._serial}_probe_{probe_number}_connected"
-        self._attr_name = f"{self._serial} Probe {probe_number} Connected"
+        self._attr_name = f"Probe {probe_number} Connected"
 
     @property
     def is_on(self) -> bool:
@@ -66,11 +68,11 @@ class GmgWarningBinarySensor(GmgBaseBinarySensor):
     """Binary sensor indicating whether the grill has an active warning."""
 
     _attr_device_class = BinarySensorDeviceClass.PROBLEM
+    _attr_name = "Warning"
 
     def __init__(self, coordinator: GmgDataUpdateCoordinator) -> None:
         super().__init__(coordinator)
         self._attr_unique_id = f"{self._serial}_warning"
-        self._attr_name = f"{self._serial} Warning"
 
     @property
     def is_on(self) -> bool:

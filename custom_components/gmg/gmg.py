@@ -18,21 +18,20 @@ def grills(timeout = 1, ip_bind_address = '0.0.0.0'):
     _LOGGER.debug("Opening up udp sockets and broadcasting for grills.")
    
     interfaces = socket.getaddrinfo(host=socket.gethostname(), port=None, family=socket.AF_INET)
-    allips = [ip[-1][0] for ip in interfaces]
-    allips.append(ip_bind_address)
+    allips = list(dict.fromkeys([ip[-1][0] for ip in interfaces] + [ip_bind_address]))
 
     grills = [] 
     message = grill.CODE_SERIAL
 
-    
     for ip in allips:
         _LOGGER.debug(f"Creating socket for IP: {ip}")
+        sock = None
         try:
             sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
-            #Bind to the specific IP for the adapter and use port 0 to signify any open port by the OS
+            # Bind to the specific IP for the adapter and use port 0 to signify any open port by the OS
             sock.bind((ip, 0))
-            
+
             # Each recv should have the full timeout period to complete
             sock.settimeout(timeout)
 
@@ -44,7 +43,11 @@ def grills(timeout = 1, ip_bind_address = '0.0.0.0'):
                 addGrill = True
                 # Get some packets from the network
                 data, (address, retSocket) = sock.recvfrom(1024)
-                response = data.decode('utf-8')
+                try:
+                    response = data.decode('utf-8').strip()
+                except UnicodeDecodeError:
+                    _LOGGER.debug(f"Ignoring non-UTF-8 discovery packet from {address}:{retSocket}")
+                    continue
 
                 _LOGGER.debug(f"Received a response {address}:{retSocket}, {response}")
                 # Confirm it's a GMG serial number
@@ -65,9 +68,12 @@ def grills(timeout = 1, ip_bind_address = '0.0.0.0'):
             # This will always happen, a timeout occurs when we no longer hear from any grills
             # This is the required flow to break out of the `while True:` statement above.
             _LOGGER.debug("Socket timed out.")
+        except OSError as err:
+            _LOGGER.debug(f"Socket discovery error on {ip}: {err}")
         finally:
             # Always close the socket
-            sock.close()
+            if sock is not None:
+                sock.close()
 
     _LOGGER.debug(f"Found {len(grills)} grills.")
     return grills
@@ -85,14 +91,13 @@ class grill(object):
     CODE_STATUS = b'UR001!'
     
     def __init__(self, ip, serial_number = ''):
-        
-        if not ipaddress.ip_address(ip):
-            raise ValueError(f"IP address not valid {ip}")
+        addr = ipaddress.ip_address(str(ip).strip())
 
-        _LOGGER.debug(f"Initializing grill {ip} with serial number {serial_number}")
+        _LOGGER.debug(f"Initializing grill {addr} with serial number {serial_number}")
 
-        self._ip = ip 
+        self._ip = str(addr)
         self._serial_number = serial_number
+        self.state = {}
 
     @property
     def ip(self) -> str:
@@ -195,7 +200,9 @@ class grill(object):
         if probe_number == 1:
             message = b'UF' + str(target_temp).encode() + b'!'
         elif probe_number == 2:
-            message = b'Uf' + str(target_temp).encode() + b'!'        
+            message = b'Uf' + str(target_temp).encode() + b'!'
+        else:
+            raise ValueError(f"Invalid probe number {probe_number}; expected 1 or 2")
 
         return self.send(message)
 
@@ -219,22 +226,18 @@ class grill(object):
         return self.send(message)
 
     def status(self):
-        """Get status of grill"""
+        """Get status of grill, retrying up to 5 times on timeout or invalid packet."""
+        self.state = {}
+        for _ in range(5):
+            raw = self.send(grill.CODE_STATUS)
+            if raw is not None:
+                parsed = self.gmg_status_response(list(raw))
+                if parsed:
+                    return parsed
 
-        status = None
-        count = 0
-
-        # No response from grill so resend status request up to 5 times
-        while status is None and count < 5:
-            status = self.send(grill.CODE_STATUS)
-            count += 1
-
-        if status is None:
-            _LOGGER.debug(f"No response from grill at {self._ip}")
-            self.state = {}
-            return self.state
-
-        return self.gmg_status_response(list(status))
+        _LOGGER.debug(f"No valid response from grill at {self._ip}")
+        self.state = {}
+        return self.state
 
     def serial(self):
         """Get serial number of grill"""
@@ -257,7 +260,12 @@ class grill(object):
             sock.settimeout(timeout)
 
             sock.sendto(message, (self._ip, grill.UDP_PORT))
-            data, _ = sock.recvfrom(1024)
+            data, addr = sock.recvfrom(1024)
+            if addr[0] != self._ip:
+                _LOGGER.debug(
+                    f"Ignoring UDP packet from unexpected host {addr[0]} (expected {self._ip})"
+                )
+                data = None
 
         except socket.timeout:
             _LOGGER.debug(f"Timeout sending to {self._ip}:{grill.UDP_PORT}")

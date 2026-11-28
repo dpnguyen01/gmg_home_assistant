@@ -8,18 +8,18 @@ Forked from [`jwhitby91/gmg_home_assistant`](https://github.com/jwhitby91/gmg_ho
 
 ## Features
 
-- **UI Config Flow & YAML Import**: Set up directly in the Home Assistant UI (via UDP broadcast discovery or static IP), with automatic import of legacy `climate: platform: gmg` YAML entries.
-- **Single-Poll Coordinator**: Polls the grill once every **15 seconds** over UDP port `8080` and updates all entities together under a single GMG device.
+- **UI Config Flow, Reconfigure & YAML Import**: Set up or update your grill's IP directly in the Home Assistant UI (via UDP broadcast discovery or static IP), with automatic import of legacy `climate: platform: gmg` YAML entries.
+- **Single-Poll Coordinator & Offline Hold**: Polls the grill once every **15 seconds** over UDP port `8080`, updates all entities together under a single GMG device, and holds the last known state across up to 2 transient missed polls (`~45s`) before marking entities `unavailable`.
 - **16-Bit Temperature Decoding**: Properly decodes little-endian 16-bit temperatures above `255 °F` for both pit and probe readings.
 - **Reliable Unplugged Probe Detection**: Detects GMG's out-of-range sentinel (such as `601 °F`, anything `> 257 °F`) so unplugged probes report `off` / `unknown` instead of bogus high temperatures.
 - **Corrupted Packet & Spike Filtering**:
-  - Rejects out-of-range/corrupted UDP status packets (`on` not in `0/1/2`, `temp > 650`, `grill_set_temp > 600`, or `probe*_set_temp > 257`).
-  - Suppresses single-poll ADC/sensor spikes in `GmgDataUpdateCoordinator` by requiring **2 consecutive polls** before accepting large jumps (`> 35 °F` on the pit, `> 15 °F` on a connected probe).
+  - Rejects out-of-range/corrupted UDP status packets (`on` not in `0/1/2`, `temp > 650`, `grill_set_temp > 600`, or `probe*_set_temp > 257`) and automatically retries within the poll cycle.
+  - Suppresses single-poll ADC/sensor spikes in `GmgDataUpdateCoordinator` while allowing sustained fast temperature ramps (`> 35 °F` pit / `> 15 °F` probe threshold).
 - **Mode-Aware Probe Minimums**:
   - **Heat mode (`on == 1`)**: Probe `min_temp` is **`100 °F`** for cleaner thermostat control.
   - **Cold Smoke (`fan_only`) / Off**: Probe `min_temp` is **`32 °F`** so low ambient temperatures remain supported.
 - **Temperature Steps & Bounds**:
-  - **Grill Pit**: `150–500 °F` in **`5 °F`** steps (note: grill must be powered on and pit temp `>= 145 °F` before setting target temperature).
+  - **Grill Pit**: `150–500 °F` in **`5 °F`** steps (grill must be powered on and either past cold startup `>= 145 °F` or in `Running` fire state).
   - **Food Probes 1 & 2**: `32–257 °F` (`100–257 °F` in heat mode) in **`1 °F`** steps.
 
 ---
@@ -115,7 +115,7 @@ Communication uses UDP port `8080`:
 Unit and regression tests stub out Home Assistant internals so they can run locally without a full Home Assistant installation:
 
 ```bash
-python -m unittest tests/test_gmg.py -v
+python -m unittest discover -s tests -t . -v
 ```
 
-Current status: **11/11 tests passing** in `tests/test_gmg.py` (covering 16-bit decoding, unplugged probe detection, command bounds, corrupted packet rejection, coordinator single-poll spike filtering, cold smoke mode, and config flow).
+See [CHANGELOG.md](CHANGELOG.md) for release history and notable changes.
